@@ -177,7 +177,8 @@ dense_query_texts[]
 - `keywords`;
 - `entities`;
 - `date_mentions`;
-- `asker`
+- `asker`;
+- части `variants` и `hyde` для paraphrase-heavy кейсов
 
 Потом они локально превращаются в sparse vectors:
 
@@ -232,7 +233,8 @@ Sparse retrieval ищет точные keyword-сигналы.
 
 Он использует:
 - phrase hits из `keywords`, `entities`, `date_mentions`, `asker`;
-- signal tokens из `search_text` / `text`;
+- signal tokens из `search_text` / `text` / части `variants` / `hyde`;
+- лучший message-block внутри chunk;
 - metadata hits по `participants` и `mentions`;
 - мягкий boost по `date_range`, если временной интервал пересекается.
 
@@ -241,6 +243,10 @@ Sparse retrieval ищет точные keyword-сигналы.
 - он помогает even без внешнего reranker;
 - он особенно важен как fallback при `429` от `/score`.
 
+При этом для локального пересчёта полезно сильнее доверять секции `MESSAGES`, чем `CONTEXT`.
+`CONTEXT` помогает retrieval, но при ранжировании легко создаёт ложный приоритет соседнему chunk'у, если query совпал не с ответом, а с overlap-сообщением.
+Если chunk матчится только по `CONTEXT`, а `MESSAGES` пусты по сигналам, такой кандидат лучше ещё и штрафовать.
+
 ## 11. Rerank
 
 После fusion берётся top-N кандидатов и прогоняется через reranker.
@@ -248,7 +254,7 @@ Sparse retrieval ищет точные keyword-сигналы.
 Reranker получает:
 - текст вопроса;
 - при наличии точных сигналов 1-2 коротких уточнения из `keywords` / `entities` / `date_mentions`;
-- `page_content` chunk'ов.
+- компактную версию `page_content`, где `MESSAGES` идут раньше `CONTEXT`.
 
 Его задача:
 - точнее пересортировать уже найденные хорошие кандидаты.
@@ -263,6 +269,8 @@ Reranker получает:
 
 После rerank нужно:
 - убрать дубли chunk'ов;
+- по возможности переупорядочить `message_ids` внутри chunk по message-level сигналам;
+- затем собрать глобальный ranking уже на уровне отдельных `message_id`, а не только на уровне порядка chunk'ов;
 - убрать повторяющиеся `message_ids`;
 - ограничить итоговую выдачу до 50;
 - вернуть `results[].message_ids`.

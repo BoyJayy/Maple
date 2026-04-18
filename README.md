@@ -31,6 +31,7 @@
 
 Текущий `index` уже не является заглушкой:
 - нормализует `text`, `parts`, `file_snippets`, `mentions`;
+- преобразует `member_event` системных сообщений в searchable text;
 - фильтрует скрытые и шумные сообщения;
 - делает message-based chunking с overlap-контекстом;
 - сжимает длинные технические логи;
@@ -44,7 +45,11 @@
 - использует несколько sparse queries из `keywords`, `entities`, `date_mentions`, `asker`;
 - объединяет retrieval через `RRF`;
 - делает мягкий local rescoring по exact signals, `entities`, `participants` / `mentions` и `date_range`;
+- сильнее доверяет совпадениям в `MESSAGES`, а не случайным совпадениям в `CONTEXT`, чтобы соседние чанки не обгоняли реальный ответ;
 - делает ограниченный rerank top-кандидатов;
+- отправляет во внешний reranker текст кандидата в формате `MESSAGES -> CONTEXT`, чтобы точный ответ внутри чанка не терялся за overlap-контекстом;
+- умеет мягко переупорядочивать `message_ids` внутри найденного chunk;
+- собирает финальную выдачу уже на уровне отдельных `message_id`, а не только на уровне chunk order;
 - режет слишком длинные тексты перед rerank;
 - при `429` от внешнего reranker использует fallback на retrieval order вместо падения `500`;
 - дедуплицирует `message_ids` и ограничивает выдачу top-50.

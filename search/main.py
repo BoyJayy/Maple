@@ -171,16 +171,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Search Service", version="0.1.0", lifespan=lifespan)
 
 
-DENSE_PREFETCH_K = 35
+DENSE_PREFETCH_K = 45
 SPARSE_PREFETCH_K = 45
-RETRIEVE_K = 50
+RETRIEVE_K = 60
 RERANK_LIMIT = 8
 RERANK_MAX_TEXT_CHARS = 1200
 FINAL_MESSAGE_LIMIT = 50
-MAX_DENSE_QUERIES = 5
-MAX_SPARSE_QUERIES = 4
+MAX_DENSE_QUERIES = 8
+MAX_SPARSE_QUERIES = 6
 WHITESPACE_RE = re.compile(r"\s+")
 TOKEN_RE = re.compile(r"[\w@./:+-]+", re.UNICODE)
+MESSAGE_BLOCK_SPLIT_RE = re.compile(r"\n\n(?=\[\d{4}-\d{2}-\d{2} )")
+PART_FLAG_RE = re.compile(r"part=(\d+)/(\d+)")
 
 
 def normalize_query_text(text: str) -> str:
@@ -223,8 +225,8 @@ def build_dense_queries(question: Question) -> list[str]:
     candidates = [
         question.search_text,
         question.text,
-        *((question.variants or [])[:3]),
-        *((question.hyde or [])[:2]),
+        *((question.variants or [])[:4]),
+        *((question.hyde or [])[:3]),
     ]
     return unique_texts(candidates, limit=MAX_DENSE_QUERIES)
 
@@ -248,6 +250,8 @@ def build_sparse_queries(question: Question) -> list[str]:
         " ".join(entity_terms),
         primary,
         question.text,
+        *((question.variants or [])[:2]),
+        *((question.hyde or [])[:1]),
     ]
     return unique_texts(candidates, limit=MAX_SPARSE_QUERIES)
 
@@ -317,11 +321,37 @@ def build_query_signal_tokens(question: Question) -> list[str]:
         question.text,
         *(question.keywords or []),
         *collect_entity_terms(question.entities),
+        *((question.variants or [])[:2]),
+        *((question.hyde or [])[:2]),
     ]
     tokens: list[str] = []
     for candidate in candidates:
         tokens.extend(extract_signal_tokens(candidate))
     return unique_texts(tokens)
+
+
+def query_prefers_earliest_message(question: Question) -> bool:
+    lowered = " ".join(
+        part.lower()
+        for part in [
+            question.text,
+            question.search_text,
+            *(question.keywords or []),
+            *((question.variants or [])[:2]),
+        ]
+        if part
+    )
+    return any(
+        marker in lowered
+        for marker in (
+            "перв",
+            "исходн",
+            "самое ран",
+            "начал",
+            "first",
+            "earliest",
+        )
+    )
 
 
 def parse_timestamp(value: Any, *, end_of_day: bool = False) -> int | None:
@@ -371,6 +401,43 @@ def get_point_text(point: Any) -> str:
     return normalize_query_text(str(get_point_payload(point).get("page_content") or "")).lower()
 
 
+def split_page_sections(page_content: str) -> tuple[str, str]:
+    if not page_content:
+        return "", ""
+
+    if "MESSAGES:" not in page_content:
+        return "", page_content
+
+    before_messages, messages = page_content.split("MESSAGES:", 1)
+    context = ""
+    if "CONTEXT:" in before_messages:
+        _, context = before_messages.split("CONTEXT:", 1)
+
+    return context.strip(), messages.strip()
+
+
+def get_point_context_text(point: Any) -> str:
+    context_text, _ = split_page_sections(str(get_point_payload(point).get("page_content") or ""))
+    return normalize_query_text(context_text).lower()
+
+
+def get_point_message_text(point: Any) -> str:
+    _, message_text = split_page_sections(str(get_point_payload(point).get("page_content") or ""))
+    return normalize_query_text(message_text).lower()
+
+
+def build_rerank_target(point: Any) -> str:
+    page_content = str(get_point_payload(point).get("page_content") or "")
+    context_text, message_text = split_page_sections(page_content)
+    if not message_text:
+        return normalize_query_text(page_content)
+
+    sections = [f"MESSAGES:\n{message_text}"]
+    if context_text:
+        sections.append(f"CONTEXT:\n{context_text}")
+    return normalize_query_text("\n\n".join(sections))
+
+
 def score_text_signals(
     text: str,
     *,
@@ -381,16 +448,42 @@ def score_text_signals(
     for term in phrase_terms:
         if term and term in text:
             if any(ch.isdigit() for ch in term) or any(ch in term for ch in "@./:+-_"):
-                phrase_boost += 0.05
+                phrase_boost += 0.07
             else:
-                phrase_boost += 0.03
+                phrase_boost += 0.04
 
     token_boost = 0.0
     for token in token_terms:
         if token and token in text:
-            token_boost += 0.008
+            token_boost += 0.01
 
-    return min(phrase_boost, 0.18) + min(token_boost, 0.06)
+    return min(phrase_boost, 0.24) + min(token_boost, 0.08)
+
+
+def score_best_message_block(
+    point: Any,
+    *,
+    phrase_terms: list[str],
+    token_terms: list[str],
+) -> float:
+    page_content = str(get_point_payload(point).get("page_content") or "")
+    blocks = collapse_message_blocks(extract_message_blocks(page_content))
+    if not blocks:
+        return 0.0
+
+    best_score = 0.0
+    for block in blocks:
+        block_text = normalize_query_text(block).lower()
+        block_score = score_text_signals(
+            block_text,
+            phrase_terms=phrase_terms,
+            token_terms=token_terms,
+        )
+        if len(block_text) <= 220 and block_score > 0:
+            block_score += 0.03
+        best_score = max(best_score, block_score)
+
+    return min(best_score, 0.28)
 
 
 def score_metadata_signals(
@@ -432,12 +525,23 @@ def compute_local_boost(question: Question, point: Any) -> float:
     token_terms = build_query_signal_tokens(question)
     identity_terms = set(normalize_terms([question.asker, *collect_entity_terms(question.entities)]))
 
-    payload_text = get_point_text(point)
+    message_text = get_point_message_text(point)
+    context_text = get_point_context_text(point)
     metadata = get_point_metadata(point)
+    message_score = score_text_signals(message_text, phrase_terms=phrase_terms, token_terms=token_terms)
+    context_score = score_text_signals(context_text, phrase_terms=phrase_terms, token_terms=token_terms)
+    best_block_score = score_best_message_block(point, phrase_terms=phrase_terms, token_terms=token_terms)
+    context_penalty = 0.0
+    if context_score > 0 and message_score == 0 and best_block_score == 0:
+        context_penalty = 0.08
+
     return (
-        score_text_signals(payload_text, phrase_terms=phrase_terms, token_terms=token_terms)
+        message_score
+        + min(context_score * 0.2, 0.05)
+        + best_block_score
         + score_metadata_signals(metadata, identity_terms=identity_terms)
         + score_temporal_signal(question, metadata)
+        - context_penalty
     )
 
 
@@ -546,6 +650,113 @@ def extract_message_ids(point: Any) -> list[str]:
     return [str(message_id) for message_id in message_ids]
 
 
+def extract_message_blocks(page_content: str) -> list[str]:
+    if "MESSAGES:" not in page_content:
+        return []
+
+    messages_section = page_content.split("MESSAGES:", 1)[1].strip()
+    if not messages_section:
+        return []
+
+    return [block.strip() for block in MESSAGE_BLOCK_SPLIT_RE.split(messages_section) if block.strip()]
+
+
+def collapse_message_blocks(blocks: list[str]) -> list[str]:
+    grouped: list[str] = []
+    index = 0
+    while index < len(blocks):
+        block = blocks[index]
+        header = block.splitlines()[0] if block else ""
+        part_match = PART_FLAG_RE.search(header)
+
+        if part_match and part_match.group(1) == "1":
+            fragment_total = int(part_match.group(2))
+            group = blocks[index : index + fragment_total]
+            grouped.append("\n\n".join(group).strip())
+            index += fragment_total
+            continue
+
+        grouped.append(block)
+        index += 1
+
+    return grouped
+
+
+def reorder_message_ids_for_point(question: Question, point: Any) -> list[str]:
+    message_ids = extract_message_ids(point)
+    if len(message_ids) <= 1:
+        return message_ids
+
+    page_content = str(get_point_payload(point).get("page_content") or "")
+    blocks = collapse_message_blocks(extract_message_blocks(page_content))
+    if len(blocks) != len(message_ids):
+        return message_ids
+
+    phrase_terms = build_phrase_terms(question)
+    token_terms = build_query_signal_tokens(question)
+    prefer_earliest = query_prefers_earliest_message(question)
+
+    scored = []
+    for index, (message_id, block) in enumerate(zip(message_ids, blocks, strict=True)):
+        block_text = normalize_query_text(block).lower()
+        block_score = score_text_signals(
+            block_text,
+            phrase_terms=phrase_terms,
+            token_terms=token_terms,
+        )
+        if prefer_earliest:
+            block_score += max(0.0, 0.04 - index * 0.01)
+        scored.append((block_score, -index, message_id))
+
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [message_id for _, _, message_id in scored]
+
+
+def score_message_block(
+    question: Question,
+    block: str,
+    *,
+    message_index: int,
+) -> float:
+    phrase_terms = build_phrase_terms(question)
+    token_terms = build_query_signal_tokens(question)
+    block_text = normalize_query_text(block).lower()
+    block_score = score_text_signals(
+        block_text,
+        phrase_terms=phrase_terms,
+        token_terms=token_terms,
+    )
+    if len(block_text) <= 220 and block_score > 0:
+        block_score += 0.03
+    if query_prefers_earliest_message(question):
+        block_score += max(0.0, 0.04 - message_index * 0.01)
+    return block_score
+
+
+def assemble_message_ids(question: Question, points: list[Any], *, limit: int) -> list[str]:
+    scored_messages: list[tuple[float, int, int, str]] = []
+
+    for point_index, point in enumerate(points):
+        page_content = str(get_point_payload(point).get("page_content") or "")
+        message_ids = extract_message_ids(point)
+        blocks = collapse_message_blocks(extract_message_blocks(page_content))
+        point_bonus = max(0.0, 0.18 - point_index * 0.004)
+
+        if len(blocks) == len(message_ids) and blocks:
+            for message_index, (message_id, block) in enumerate(zip(message_ids, blocks, strict=True)):
+                block_score = score_message_block(question, block, message_index=message_index)
+                scored_messages.append((point_bonus + block_score, -point_index, -message_index, message_id))
+            continue
+
+        for message_index, message_id in enumerate(reorder_message_ids_for_point(question, point)):
+            fallback_bonus = max(0.0, point_bonus - message_index * 0.01)
+            scored_messages.append((fallback_bonus, -point_index, -message_index, message_id))
+
+    scored_messages.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    ordered_message_ids = [message_id for _, _, _, message_id in scored_messages]
+    return dedupe_message_ids(ordered_message_ids, limit=limit)
+
+
 async def get_rerank_scores(
     client: httpx.AsyncClient,
     label: str,
@@ -585,7 +796,7 @@ async def rerank_points(
     rerank_candidates = points[:RERANK_LIMIT]
     untouched_tail = points[RERANK_LIMIT:]
     rerank_targets = [
-        trim_rerank_text(str((point.payload or {}).get("page_content") or ""), limit=RERANK_MAX_TEXT_CHARS)
+        trim_rerank_text(build_rerank_target(point), limit=RERANK_MAX_TEXT_CHARS)
         for point in rerank_candidates
     ]
 
@@ -646,11 +857,7 @@ async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
     rerank_query = build_rerank_query(payload.question)
     best_points = await rerank_points(client, payload.question, rerank_query, best_points)
 
-    message_ids: list[str] = []
-    for point in best_points:
-        message_ids += extract_message_ids(point)
-
-    final_message_ids = dedupe_message_ids(message_ids, limit=FINAL_MESSAGE_LIMIT)
+    final_message_ids = assemble_message_ids(payload.question, best_points, limit=FINAL_MESSAGE_LIMIT)
     if not final_message_ids:
         return SearchAPIResponse(results=[])
 
