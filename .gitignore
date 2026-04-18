@@ -1,6 +1,44 @@
 CLAUDE.md
+
+# OS / editors
 .DS_Store
+.idea/
 .vscode/
+
+# Python environments
 .python-version
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Python tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+
+# Coverage / test reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Packaging / build artifacts
+build/
+dist/
+site/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Notebooks
+.ipynb_checkpoints/
