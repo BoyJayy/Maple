@@ -18,6 +18,7 @@ ignore = [
     "FBT",
     "ANN",
     "BLE001",
+    "RUF002", # ambiguous unicode in Russian docstrings (false positives)
     "RUF003", # ambiguous unicode in Russian comments (false positives)
 ]
 

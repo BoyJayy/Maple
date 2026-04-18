@@ -6,7 +6,116 @@
 
 ## Полный pipeline
 
-Две фазы: **индексация** (один раз при загрузке данных) и **поиск** (на каждый вопрос).
+Две фазы: **индексация** (один раз при загрузке данных) и **поиск** (на каждый вопрос). Связаны через Qdrant — это единственное состояние между ними.
+
+### Единая схема
+
+```
+┌───────────────────────────────── INDEXING (один раз) ────────────────────────────────────┐
+│                                                                                           │
+│   data/Go Nova.json                                                                       │
+│        │                                                                                  │
+│        │ {chat, overlap_messages, new_messages}                                           │
+│        ▼                                                                                  │
+│   ╔═══════════════════╗                                                                   │
+│   ║ [A] INDEX SERVICE ║   index/main.py                                                   │
+│   ║    POST /index    ║   build_chunks():                                                 │
+│   ╚═══════════════════╝     • filter (drop system/hidden)                                 │
+│        │                    • render (text + parts + file_snippets)                       │
+│        │                    • sort by (time, id)                                          │
+│        │                    • boundary cut:  thread-change | gap>1h | size>UPPER          │
+│        │                    • overlap tail:  last 2 msgs (same thread, no hard break)     │
+│        │                    • emit чанки, где есть хотя бы одно new_message               │
+│        │                                                                                  │
+│        │ IndexAPIItem[] {                                                                 │
+│        │   page_content,   ← payload  + rerank input                                      │
+│        │   dense_content,  ← dense embed input                                            │
+│        │   sparse_content, ← sparse embed input                                           │
+│        │   message_ids     ← payload  + финальный вывод search                            │
+│        │ }                                                                                │
+│        ▼                                                                                  │
+│   ╔═══════════════════╗                                                                   │
+│   ║ [B]  INGESTION    ║   eval/ingest.py (orchestrator)                                   │
+│   ║   orchestrator    ║   • stable_chunk_id = uuid5(NAMESPACE, chat_id + sorted(msg_ids)) │
+│   ╚═══════════════════╝   • batch: dense_content → DENSE API (Qwen3-Embedding-0.6B)       │
+│        │    │               POST /v1/embeddings, Basic Auth, → vec[1024] cosine           │
+│        │    │                                                                             │
+│        │    │             • batch: sparse_content → index /sparse_embedding              │
+│        │    │               fastembed Qdrant/bm25 → {indices, values}                     │
+│        │    │                                                                             │
+│        │    │             • build payload: page_content + metadata(chat/thread/msg_ids/   │
+│        │    │               participants/start/end/forward/quote)                         │
+│        │    ▼                                                                             │
+│        │   UPSERT ──────────────────────────┐                                             │
+│        ▼                                    ▼                                             │
+│   ┌───────────────────────────────────────────────────────────────────┐                   │
+│   │ [C] QDRANT COLLECTION "evaluation"                                │                   │
+│   │     point id = stable_chunk_id                                    │                   │
+│   │     vectors:  "dense"  → VectorParams(1024, cosine)               │                   │
+│   │               "sparse" → SparseVectorParams(modifier=IDF)         │                   │
+│   │     payload:  page_content + metadata + message_ids               │                   │
+│   └───────────────────────────────────────────────────────────────────┘                   │
+│                                   │                                                       │
+└───────────────────────────────────┼───────────────────────────────────────────────────────┘
+                                    │
+                     shared state   │  (Qdrant = мост между фазами)
+                                    │
+┌───────────────────────────────────┼───────── SEARCH (на каждый вопрос) ───────────────────┐
+│                                   │                                                       │
+│   question = {text, variants?, hyde?, keywords?, entities?, date_range?, asker?, ...}     │
+│        │                          │                                                       │
+│        ├─► text ──► DENSE API ────┼─────► query_dense[1024]                               │
+│        │                          │             │                                         │
+│        ├─► text ──► fastembed ────┼─────► query_sparse{indices, values}                   │
+│        │           (bm25 lru)     │             │                                         │
+│        │                          ▼             ▼                                         │
+│        │         ╔═══════════════════════════════════════╗                                │
+│        │         ║ [D] QDRANT HYBRID QUERY               ║   search/main.py               │
+│        │         ║     prefetch_dense  = top 10 cosine   ║   qdrant_search():             │
+│        │         ║     prefetch_sparse = top 30 bm25     ║   RRF = Σ 1/(60 + rank)        │
+│        │         ║     fusion = RRF                      ║                                │
+│        │         ║     return top RETRIEVE_K = 20 points ║                                │
+│        │         ╚═══════════════════════════════════════╝                                │
+│        │                          │                                                       │
+│        │                          │ points[] with payload.page_content + metadata         │
+│        │                          ▼                                                       │
+│        │         ╔═══════════════════════════════════════╗                                │
+│        └────────►║ [E] RERANK                            ║                                │
+│                  ║   POST RERANKER_URL                   ║                                │
+│                  ║   model=nvidia/llama-nemotron-rerank  ║                                │
+│                  ║   input  = (query, page_content[])    ║                                │
+│                  ║   output = score[]                    ║                                │
+│                  ║   sort points by score DESC           ║                                │
+│                  ╚═══════════════════════════════════════╝                                │
+│                                   │                                                       │
+│                                   ▼                                                       │
+│                  ╔═══════════════════════════════════════╗                                │
+│                  ║ [F] FINAL ASSEMBLY  (TODO — Этап 10)  ║                                │
+│                  ║   flatten message_ids по всем чанкам  ║                                │
+│                  ║   dedup + diversity control           ║                                │
+│                  ║   cap 50 unique message_ids           ║                                │
+│                  ╚═══════════════════════════════════════╝                                │
+│                                   │                                                       │
+│                                   ▼                                                       │
+│             {"results": [{"message_ids": ["...", "...", ...]}]}                           │
+│                                                                                           │
+└───────────────────────────────────────────────────────────────────────────────────────────┘
+
+ Внешние зависимости (проксируемые проверяющей системой, Basic Auth):
+ • DENSE API     — Qwen3-Embedding-0.6B, OpenAI-compatible /v1/embeddings
+ • RERANKER API  — nvidia/llama-nemotron-rerank-1b-v2, pair scoring (query, candidates)
+
+ Локальные модели:
+ • fastembed Qdrant/bm25 — кешируется lru_cache, тянется в index-service и search-service
+```
+
+**Что критично в этой схеме:**
+
+- `stable_chunk_id` — одинаковый чанк даёт одинаковый id → upsert идемпотентен. Меняем chunking → точки перезаписываются без дублей.
+- Разделение `page_content` / `dense_content` / `sparse_content` — три разные модели требуют разного формата. Сейчас идентичны, разделение в Этапе 2.
+- Prefetch K разный для dense (10) и sparse (30): sparse даёт больше ложных срабатываний, но дешев — лучше дать ему больше кандидатов.
+- RRF не чувствителен к абсолютным значениям score (cosine vs BM25 несравнимы) — работает по рангам.
+- Qdrant — единственное общее состояние. Всё остальное stateless.
 
 ### Фаза 1 — индексация
 
