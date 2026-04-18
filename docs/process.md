@@ -149,28 +149,41 @@ sparse_content
 - `date_range`
 - `asker`
 
-Даже если baseline пока использует не все поля, целевой pipeline должен учитывать их.
+Текущая реализация `search` уже использует enriched question заметно сильнее baseline.
 
 ## 7. Query side pipeline
 
 ### 7.1 Dense query
 
-Из вопроса строится dense vector:
+Из вопроса строятся несколько dense query texts:
+- `search_text`
+- `text`
+- часть `variants`
+- часть `hyde`
+
+Потом они батчем отправляются во внешний dense API:
 
 ```text
-question/search_text
+dense_query_texts[]
 -> POST /embeddings
--> dense query vector
+-> dense query vectors[]
 ```
 
 ### 7.2 Sparse query
 
-Из вопроса строится sparse vector:
+Из вопроса строятся несколько sparse query texts из:
+- primary query;
+- `keywords`;
+- `entities`;
+- `date_mentions`;
+- `asker`
+
+Потом они локально превращаются в sparse vectors:
 
 ```text
-question/search_text/keywords/entities
+sparse_query_texts[]
 -> sparse embedding
--> sparse query vector
+-> sparse query vectors[]
 ```
 
 ## 8. Retrieval
@@ -198,14 +211,14 @@ Sparse retrieval ищет точные keyword-сигналы.
 
 ## 9. Fusion
 
-После retrieval есть минимум два списка кандидатов:
-- dense candidates;
-- sparse candidates.
+После retrieval есть несколько списков кандидатов:
+- dense candidates из нескольких dense queries;
+- sparse candidates из нескольких sparse queries.
 
 Их нужно объединить в один общий ranking.
 
-Самый безопасный baseline:
-- `RRF` или другой rank-based fusion.
+Текущий безопасный baseline:
+- `RRF`
 
 Идея:
 - dense даёт смысл;
@@ -228,7 +241,7 @@ Reranker получает:
 После rerank нужно:
 - убрать дубли chunk'ов;
 - убрать повторяющиеся `message_ids`;
-- ограничить итоговую выдачу;
+- ограничить итоговую выдачу до 50;
 - вернуть `results[].message_ids`.
 
 Это важно, потому что оценка завязана именно на `message_ids`, а не на самих chunk'ах.
