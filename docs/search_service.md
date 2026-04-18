@@ -46,6 +46,7 @@ question
 -> sparse embed batch
 -> Qdrant hybrid retrieval
 -> RRF fusion
+-> local rescoring
 -> rerank top candidates
 -> dedupe message_ids
 -> top-50 results
@@ -123,10 +124,28 @@ Sparse queries тоже считаются батчем.
 
 ## 4. Rerank
 
+Перед внешним rerank сервис делает мягкий local rescoring кандидатов.
+
+Он использует:
+- точные phrase hits из `keywords`, `entities`, `date_mentions`, `asker`;
+- token hits из `search_text` / `text`;
+- metadata сигналы по `participants` и `mentions`;
+- мягкий temporal boost, если есть `date_range`.
+
+Этот слой:
+- почти ничего не стоит по latency;
+- помогает подтянуть exact matches выше ещё до внешнего reranker;
+- улучшает fallback-поведение, если внешний reranker недоступен или rate-limited.
+
+Сам rerank query тоже делается не совсем сырым:
+- база = `search_text`, иначе `text`;
+- при наличии точных сигналов сервис добавляет 1-2 кратких уточнения из `keywords` / `entities` / `date_mentions`.
+
 После retrieval сервис:
 - берёт top кандидатов;
 - отправляет только ограниченный top-N во внешний reranker;
 - режет слишком длинный `page_content` до компактной версии;
+- после ответа reranker использует local boost как мягкий stabilizer для exact/entity-heavy кейсов;
 - пересортировывает кандидаты по score reranker.
 
 Это повышает качество первых позиций, а значит и `nDCG@50`.
@@ -155,7 +174,7 @@ Sparse queries тоже считаются батчем.
 
 Сервис пока не:
 - применяет жёсткие date filters в Qdrant;
-- делает metadata boosts по `participants` / `mentions`;
+- использует жёсткие metadata filters по `participants` / `mentions`;
 - использует отдельную сложную query strategy по `date_range`.
 
 То есть текущая реализация уже сильнее baseline, но ещё оставляет пространство для тюнинга.

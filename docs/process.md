@@ -15,6 +15,7 @@ question
 -> search
 -> dense retrieval + sparse retrieval
 -> fusion
+-> local rescoring
 -> rerank
 -> results[].message_ids
 ```
@@ -225,12 +226,28 @@ Sparse retrieval ищет точные keyword-сигналы.
 - sparse даёт точные совпадения;
 - fusion объединяет обе ветки.
 
-## 10. Rerank
+## 10. Local rescoring
+
+После `RRF` сервис делает лёгкий локальный пересчёт кандидатов.
+
+Он использует:
+- phrase hits из `keywords`, `entities`, `date_mentions`, `asker`;
+- signal tokens из `search_text` / `text`;
+- metadata hits по `participants` и `mentions`;
+- мягкий boost по `date_range`, если временной интервал пересекается.
+
+Это полезно, потому что:
+- такой слой дешёвый;
+- он помогает even без внешнего reranker;
+- он особенно важен как fallback при `429` от `/score`.
+
+## 11. Rerank
 
 После fusion берётся top-N кандидатов и прогоняется через reranker.
 
 Reranker получает:
 - текст вопроса;
+- при наличии точных сигналов 1-2 коротких уточнения из `keywords` / `entities` / `date_mentions`;
 - `page_content` chunk'ов.
 
 Его задача:
@@ -239,9 +256,10 @@ Reranker получает:
 Практически важно не перегружать внешний reranker:
 - реранкать только ограниченный top-N;
 - не отправлять бесконечно длинный `page_content`;
+- после ответа reranker можно сохранять мягкий local boost как stabilizer для exact matches;
 - при `429 Too Many Requests` использовать fallback на retrieval order, а не валить весь `search`.
 
-## 11. Final answer assembly
+## 12. Final answer assembly
 
 После rerank нужно:
 - убрать дубли chunk'ов;
@@ -251,7 +269,7 @@ Reranker получает:
 
 Это важно, потому что оценка завязана именно на `message_ids`, а не на самих chunk'ах.
 
-## 12. Что сейчас уже есть в проекте
+## 13. Что сейчас уже есть в проекте
 
 Уже готово:
 - контракт `index`;
@@ -262,7 +280,7 @@ Reranker получает:
 - внешний rerank API;
 - локальный `Qdrant` через `docker compose`.
 
-## 13. Как это сделано локально сейчас
+## 14. Как это сделано локально сейчас
 
 В репозитории уже есть локальный ingestion-orchestrator:
 - [`eval/ingest.py`](/Users/boyjayy/Documents/Search/eval/ingest.py)

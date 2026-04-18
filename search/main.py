@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
@@ -170,15 +171,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Search Service", version="0.1.0", lifespan=lifespan)
 
 
-DENSE_PREFETCH_K = 25
-SPARSE_PREFETCH_K = 35
-RETRIEVE_K = 40
+DENSE_PREFETCH_K = 35
+SPARSE_PREFETCH_K = 45
+RETRIEVE_K = 50
 RERANK_LIMIT = 8
 RERANK_MAX_TEXT_CHARS = 1200
 FINAL_MESSAGE_LIMIT = 50
 MAX_DENSE_QUERIES = 5
-MAX_SPARSE_QUERIES = 3
+MAX_SPARSE_QUERIES = 4
 WHITESPACE_RE = re.compile(r"\s+")
+TOKEN_RE = re.compile(r"[\w@./:+-]+", re.UNICODE)
 
 
 def normalize_query_text(text: str) -> str:
@@ -243,13 +245,26 @@ def build_sparse_queries(question: Question) -> list[str]:
     candidates = [
         combined,
         exact_focus,
+        " ".join(entity_terms),
+        primary,
         question.text,
     ]
     return unique_texts(candidates, limit=MAX_SPARSE_QUERIES)
 
 
 def build_rerank_query(question: Question) -> str:
-    return normalize_query_text(question.text or build_primary_query(question))
+    base_query = build_primary_query(question) or normalize_query_text(question.text)
+    clarifiers: list[str] = []
+    for term in build_phrase_terms(question):
+        if term and term not in base_query.lower():
+            clarifiers.append(term)
+        if len(clarifiers) >= 2:
+            break
+
+    if not clarifiers:
+        return base_query
+
+    return "\n".join([base_query, " ".join(clarifiers)])
 
 
 def dedupe_message_ids(message_ids: list[str], *, limit: int) -> list[str]:
@@ -270,6 +285,174 @@ def trim_rerank_text(text: str, *, limit: int) -> str:
     if len(normalized) <= limit:
         return normalized
     return f"{normalized[:limit].rstrip()} ..."
+
+
+def normalize_terms(values: list[str]) -> list[str]:
+    return unique_texts([value.lower() for value in values if value])
+
+
+def extract_signal_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for token in TOKEN_RE.findall(normalize_query_text(text).lower()):
+        has_special_signal = any(ch.isdigit() for ch in token) or any(ch in token for ch in "@./:+-_")
+        if len(token) >= 4 or has_special_signal:
+            tokens.append(token)
+    return unique_texts(tokens)
+
+
+def build_phrase_terms(question: Question) -> list[str]:
+    return normalize_terms(
+        [
+            *(question.keywords or []),
+            *collect_entity_terms(question.entities),
+            *(question.date_mentions or []),
+            question.asker,
+        ]
+    )
+
+
+def build_query_signal_tokens(question: Question) -> list[str]:
+    candidates = [
+        build_primary_query(question),
+        question.text,
+        *(question.keywords or []),
+        *collect_entity_terms(question.entities),
+    ]
+    tokens: list[str] = []
+    for candidate in candidates:
+        tokens.extend(extract_signal_tokens(candidate))
+    return unique_texts(tokens)
+
+
+def parse_timestamp(value: Any, *, end_of_day: bool = False) -> int | None:
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.isdigit():
+            return int(raw)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+            dt = datetime.fromisoformat(raw).replace(tzinfo=UTC)
+            if end_of_day:
+                dt += timedelta(days=1) - timedelta(seconds=1)
+            return int(dt.timestamp())
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return int(dt.timestamp())
+
+    return None
+
+
+def get_point_payload(point: Any) -> dict[str, Any]:
+    payload = getattr(point, "payload", None) or {}
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
+def get_point_metadata(point: Any) -> dict[str, Any]:
+    metadata = get_point_payload(point).get("metadata") or {}
+    if not isinstance(metadata, dict):
+        return {}
+    return metadata
+
+
+def get_point_text(point: Any) -> str:
+    return normalize_query_text(str(get_point_payload(point).get("page_content") or "")).lower()
+
+
+def score_text_signals(
+    text: str,
+    *,
+    phrase_terms: list[str],
+    token_terms: list[str],
+) -> float:
+    phrase_boost = 0.0
+    for term in phrase_terms:
+        if term and term in text:
+            if any(ch.isdigit() for ch in term) or any(ch in term for ch in "@./:+-_"):
+                phrase_boost += 0.05
+            else:
+                phrase_boost += 0.03
+
+    token_boost = 0.0
+    for token in token_terms:
+        if token and token in text:
+            token_boost += 0.008
+
+    return min(phrase_boost, 0.18) + min(token_boost, 0.06)
+
+
+def score_metadata_signals(
+    metadata: dict[str, Any],
+    *,
+    identity_terms: set[str],
+) -> float:
+    if not identity_terms:
+        return 0.0
+
+    participants = {normalize_query_text(str(item)).lower() for item in (metadata.get("participants") or []) if item}
+    mentions = {normalize_query_text(str(item)).lower() for item in (metadata.get("mentions") or []) if item}
+
+    participant_hits = len(participants & identity_terms)
+    mention_hits = len(mentions & identity_terms)
+    return min(participant_hits * 0.03, 0.06) + min(mention_hits * 0.04, 0.08)
+
+
+def score_temporal_signal(question: Question, metadata: dict[str, Any]) -> float:
+    if question.date_range is None:
+        return 0.0
+
+    query_start = parse_timestamp(question.date_range.from_)
+    query_end = parse_timestamp(question.date_range.to, end_of_day=True)
+    point_start = parse_timestamp(metadata.get("start"))
+    point_end = parse_timestamp(metadata.get("end"))
+
+    if None in {query_start, query_end, point_start, point_end}:
+        return 0.0
+
+    if point_end < query_start or point_start > query_end:
+        return 0.0
+
+    return 0.06
+
+
+def compute_local_boost(question: Question, point: Any) -> float:
+    phrase_terms = build_phrase_terms(question)
+    token_terms = build_query_signal_tokens(question)
+    identity_terms = set(normalize_terms([question.asker, *collect_entity_terms(question.entities)]))
+
+    payload_text = get_point_text(point)
+    metadata = get_point_metadata(point)
+    return (
+        score_text_signals(payload_text, phrase_terms=phrase_terms, token_terms=token_terms)
+        + score_metadata_signals(metadata, identity_terms=identity_terms)
+        + score_temporal_signal(question, metadata)
+    )
+
+
+def rescore_points(question: Question, points: list[Any]) -> list[Any]:
+    if not points:
+        return []
+
+    rescored: list[tuple[float, float, int, Any]] = []
+    for index, point in enumerate(points):
+        local_boost = compute_local_boost(question, point)
+        base_score = float(getattr(point, "score", 0.0) or 0.0)
+        rescored.append((base_score + local_boost, local_boost, -index, point))
+
+    rescored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return [point for _, _, _, point in rescored]
 
 
 async def embed_dense_many(
@@ -392,6 +575,7 @@ async def get_rerank_scores(
 
 async def rerank_points(
     client: httpx.AsyncClient,
+    question: Question,
     query: str,
     points: list[Any],
 ) -> list[Any]:
@@ -418,9 +602,12 @@ async def rerank_points(
 
     reranked_candidates = [
         point
-        for _, point in sorted(
-            zip(scores, rerank_candidates, strict=True),
-            key=lambda item: item[0],
+        for _, _, point in sorted(
+            (
+                (score + compute_local_boost(question, point), score, point)
+                for score, point in zip(scores, rerank_candidates, strict=True)
+            ),
+            key=lambda item: (item[0], item[1]),
             reverse=True,
         )
     ]
@@ -455,8 +642,9 @@ async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
     if best_points is None:
         return SearchAPIResponse(results=[])
 
+    best_points = rescore_points(payload.question, list(best_points))
     rerank_query = build_rerank_query(payload.question)
-    best_points = await rerank_points(client, rerank_query, list(best_points))
+    best_points = await rerank_points(client, payload.question, rerank_query, best_points)
 
     message_ids: list[str] = []
     for point in best_points:

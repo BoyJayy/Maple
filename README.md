@@ -43,6 +43,7 @@
 - использует несколько dense queries из `text`, `search_text`, `variants`, `hyde`;
 - использует несколько sparse queries из `keywords`, `entities`, `date_mentions`, `asker`;
 - объединяет retrieval через `RRF`;
+- делает мягкий local rescoring по exact signals, `entities`, `participants` / `mentions` и `date_range`;
 - делает ограниченный rerank top-кандидатов;
 - режет слишком длинные тексты перед rerank;
 - при `429` от внешнего reranker использует fallback на retrieval order вместо падения `500`;
