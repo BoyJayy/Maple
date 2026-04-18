@@ -44,6 +44,7 @@ chat + overlap_messages + new_messages
 На этом шаге сервис:
 - собирает текст из `text`;
 - вытаскивает `parts[*].text`;
+- превращает `member_event` системных сообщений в searchable text;
 - добавляет `file_snippets`;
 - нормализует переносы строк и пустые строки;
 - сохраняет `mentions`, `thread_sn`, `sender_id`, флаги `is_forward`, `is_quote`, `is_system`, `is_hidden`.
@@ -59,7 +60,7 @@ chat + overlap_messages + new_messages
 Сервис отбрасывает:
 - `is_hidden=true`;
 - пустые сообщения;
-- часть системных сообщений без полезного сигнала;
+- часть системных сообщений без полезного сигнала, но сохраняет `addMembers` и похожие события, если они содержат searchable text;
 - короткие ack-сообщения вроде чистого `ок`, если у них нет других сигналов.
 
 Ключевая функция:

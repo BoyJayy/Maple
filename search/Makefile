@@ -11,6 +11,7 @@ API_KEY ?= dev-api-key
 RERANKER_URL ?= 
 QDRANT_DENSE_VECTOR_NAME ?= dense
 QDRANT_SPARSE_VECTOR_NAME ?= sparse
+PLATFORM ?= linux/amd64
 
 REQUIRED_RUN_VARS := QDRANT_URL EMBEDDINGS_DENSE_URL API_KEY RERANKER_URL
 
@@ -25,7 +26,7 @@ login:
 
 build:
 	@: $(if $(TEAM_ID),,$(error TEAM_ID is required for make build))
-	docker build -t $(IMAGE) ./
+	docker build --platform $(PLATFORM) -t $(IMAGE) ./
 
 run: build
 	@: $(foreach var,$(REQUIRED_RUN_VARS),$(if $($(var)),,$(error $(var) is required for make run)))

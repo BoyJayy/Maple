@@ -15,6 +15,7 @@ question
 -> search
 -> dense retrieval + sparse retrieval
 -> fusion
+-> local rescoring
 -> rerank
 -> results[].message_ids
 ```
@@ -176,7 +177,8 @@ dense_query_texts[]
 - `keywords`;
 - `entities`;
 - `date_mentions`;
-- `asker`
+- `asker`;
+- части `variants` и `hyde` для paraphrase-heavy кейсов
 
 Потом они локально превращаются в sparse vectors:
 
@@ -225,28 +227,57 @@ Sparse retrieval ищет точные keyword-сигналы.
 - sparse даёт точные совпадения;
 - fusion объединяет обе ветки.
 
-## 10. Rerank
+## 10. Local rescoring
+
+После `RRF` сервис делает лёгкий локальный пересчёт кандидатов.
+
+Он использует:
+- phrase hits из `keywords`, `entities`, `date_mentions`, `asker`;
+- signal tokens из `search_text` / `text` / части `variants` / `hyde`;
+- лучший message-block внутри chunk;
+- metadata hits по `participants` и `mentions`;
+- мягкий boost по `date_range`, если временной интервал пересекается.
+
+Это полезно, потому что:
+- такой слой дешёвый;
+- он помогает even без внешнего reranker;
+- он особенно важен как fallback при `429` от `/score`.
+
+При этом для локального пересчёта полезно сильнее доверять секции `MESSAGES`, чем `CONTEXT`.
+`CONTEXT` помогает retrieval, но при ранжировании легко создаёт ложный приоритет соседнему chunk'у, если query совпал не с ответом, а с overlap-сообщением.
+Если chunk матчится только по `CONTEXT`, а `MESSAGES` пусты по сигналам, такой кандидат лучше ещё и штрафовать.
+
+## 11. Rerank
 
 После fusion берётся top-N кандидатов и прогоняется через reranker.
 
 Reranker получает:
 - текст вопроса;
-- `page_content` chunk'ов.
+- при наличии точных сигналов 1-2 коротких уточнения из `keywords` / `entities` / `date_mentions`;
+- компактную версию `page_content`, где `MESSAGES` идут раньше `CONTEXT`.
 
 Его задача:
 - точнее пересортировать уже найденные хорошие кандидаты.
 
-## 11. Final answer assembly
+Практически важно не перегружать внешний reranker:
+- реранкать только ограниченный top-N;
+- не отправлять бесконечно длинный `page_content`;
+- после ответа reranker можно сохранять мягкий local boost как stabilizer для exact matches;
+- при `429 Too Many Requests` использовать fallback на retrieval order, а не валить весь `search`.
+
+## 12. Final answer assembly
 
 После rerank нужно:
 - убрать дубли chunk'ов;
+- по возможности переупорядочить `message_ids` внутри chunk по message-level сигналам;
+- затем собрать глобальный ranking уже на уровне отдельных `message_id`, а не только на уровне порядка chunk'ов;
 - убрать повторяющиеся `message_ids`;
 - ограничить итоговую выдачу до 50;
 - вернуть `results[].message_ids`.
 
 Это важно, потому что оценка завязана именно на `message_ids`, а не на самих chunk'ах.
 
-## 12. Что сейчас уже есть в проекте
+## 13. Что сейчас уже есть в проекте
 
 Уже готово:
 - контракт `index`;
@@ -257,7 +288,7 @@ Reranker получает:
 - внешний rerank API;
 - локальный `Qdrant` через `docker compose`.
 
-## 13. Как это сделано локально сейчас
+## 14. Как это сделано локально сейчас
 
 В репозитории уже есть локальный ingestion-orchestrator:
 - [`eval/ingest.py`](/Users/boyjayy/Documents/Search/eval/ingest.py)

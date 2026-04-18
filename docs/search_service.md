@@ -46,6 +46,7 @@ question
 -> sparse embed batch
 -> Qdrant hybrid retrieval
 -> RRF fusion
+-> local rescoring
 -> rerank top candidates
 -> dedupe message_ids
 -> top-50 results
@@ -66,8 +67,8 @@ Primary query сейчас строится как:
 Для dense retrieval сервис строит несколько запросов:
 - `search_text`
 - `text`
-- до 3 `variants`
-- до 2 `hyde`
+- до 4 `variants`
+- до 3 `hyde`
 
 После этого запросы:
 - нормализуются;
@@ -93,6 +94,8 @@ Primary query сейчас строится как:
 - ссылки;
 - названия продуктов и документов;
 - точные технические токены.
+
+Дополнительно сервис может брать часть `variants` и `hyde` как дешёвые sparse-ветки, чтобы лучше ловить paraphrase-heavy кейсы.
 
 ## 2. Embeddings
 
@@ -123,17 +126,57 @@ Sparse queries тоже считаются батчем.
 
 ## 4. Rerank
 
+Перед внешним rerank сервис делает мягкий local rescoring кандидатов.
+
+Он использует:
+- точные phrase hits из `keywords`, `entities`, `date_mentions`, `asker`;
+- token hits из `search_text` / `text` / части `variants` / `hyde`;
+- лучший message-block внутри chunk, чтобы короткие точные ответы не проигрывали длинным обсуждениям;
+- metadata сигналы по `participants` и `mentions`;
+- мягкий temporal boost, если есть `date_range`.
+
+При этом rescoring сейчас осознанно сильнее смотрит на секцию `MESSAGES`, чем на `CONTEXT`.
+Это важно, потому что overlap-контекст часто полезен для retrieval, но может мешать ранжированию:
+- запрос совпадает с предыдущим сообщением в `CONTEXT`;
+- а сервису нужно поднять текущий message-block, который действительно отвечает на вопрос.
+
+Если candidate совпал только по `CONTEXT`, а сам `MESSAGES`-блок не содержит нужных сигналов, сервис дополнительно штрафует такой chunk.
+
+Этот слой:
+- почти ничего не стоит по latency;
+- помогает подтянуть exact matches выше ещё до внешнего reranker;
+- улучшает fallback-поведение, если внешний reranker недоступен или rate-limited.
+
+Сам rerank query тоже делается не совсем сырым:
+- база = `search_text`, иначе `text`;
+- при наличии точных сигналов сервис добавляет 1-2 кратких уточнения из `keywords` / `entities` / `date_mentions`.
+
 После retrieval сервис:
 - берёт top кандидатов;
-- отправляет их `page_content` во внешний reranker;
+- отправляет только ограниченный top-N во внешний reranker;
+- режет слишком длинный `page_content` до компактной версии;
+- переставляет секции кандидата в порядке `MESSAGES -> CONTEXT`, чтобы reranker сначала видел сам ответ, а потом overlap-контекст;
+- после ответа reranker использует local boost как мягкий stabilizer для exact/entity-heavy кейсов;
 - пересортировывает кандидаты по score reranker.
 
 Это повышает качество первых позиций, а значит и `nDCG@50`.
+
+### Защита от rate limit
+
+Внешний reranker может отвечать `429 Too Many Requests`.
+
+Чтобы из-за этого не падать целиком:
+- rerank делается только для небольшого top-N;
+- в reranker отправляется укороченный текст кандидата;
+- если внешний `/score` вернул `429`, сервис не падает `500`, а возвращает retrieval order fallback без rerank.
 
 ## 5. Final assembly
 
 После rerank сервис:
 - собирает `message_ids` из payload;
+- пытается мягко переупорядочить их внутри chunk по message-level exact signals;
+- для вопросов вида `первое`, `исходный вопрос`, `начало` умеет слегка поднимать ранние сообщения внутри chunk;
+- после этого ещё ранжирует кандидаты уже на уровне отдельных `message_id`, чтобы правильный ответ из второго chunk мог обогнать нерелевантный первый `message_id` из chunk выше;
 - дедуплицирует их с сохранением порядка;
 - ограничивает итоговый список до `50`.
 
@@ -145,7 +188,7 @@ Sparse queries тоже считаются батчем.
 
 Сервис пока не:
 - применяет жёсткие date filters в Qdrant;
-- делает metadata boosts по `participants` / `mentions`;
+- использует жёсткие metadata filters по `participants` / `mentions`;
 - использует отдельную сложную query strategy по `date_range`.
 
 То есть текущая реализация уже сильнее baseline, но ещё оставляет пространство для тюнинга.

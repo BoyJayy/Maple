@@ -31,6 +31,7 @@
 
 Текущий `index` уже не является заглушкой:
 - нормализует `text`, `parts`, `file_snippets`, `mentions`;
+- преобразует `member_event` системных сообщений в searchable text;
 - фильтрует скрытые и шумные сообщения;
 - делает message-based chunking с overlap-контекстом;
 - сжимает длинные технические логи;
@@ -43,7 +44,14 @@
 - использует несколько dense queries из `text`, `search_text`, `variants`, `hyde`;
 - использует несколько sparse queries из `keywords`, `entities`, `date_mentions`, `asker`;
 - объединяет retrieval через `RRF`;
-- делает rerank top-кандидатов;
+- делает мягкий local rescoring по exact signals, `entities`, `participants` / `mentions` и `date_range`;
+- сильнее доверяет совпадениям в `MESSAGES`, а не случайным совпадениям в `CONTEXT`, чтобы соседние чанки не обгоняли реальный ответ;
+- делает ограниченный rerank top-кандидатов;
+- отправляет во внешний reranker текст кандидата в формате `MESSAGES -> CONTEXT`, чтобы точный ответ внутри чанка не терялся за overlap-контекстом;
+- умеет мягко переупорядочивать `message_ids` внутри найденного chunk;
+- собирает финальную выдачу уже на уровне отдельных `message_id`, а не только на уровне chunk order;
+- режет слишком длинные тексты перед rerank;
+- при `429` от внешнего reranker использует fallback на retrieval order вместо падения `500`;
 - дедуплицирует `message_ids` и ограничивает выдачу top-50.
 
 ## Что менять можно
@@ -171,4 +179,136 @@ python3 eval/ingest.py
 
 ```bash
 python3 eval/run.py --dataset /path/to/questions.jsonl --k 50 --verbose
+```
+
+## Первая отправка
+
+По ТЗ образы нужно отправлять именно как Docker-образы под `linux/amd64`.
+
+### Настройка Docker
+
+Registry хакатона работает по адресу:
+- `83.166.249.64:5000`
+
+Так как он работает без TLS, его нужно добавить в `insecure-registries`.
+
+Для Docker Desktop (`macOS` / `Windows`):
+- открыть `Docker Desktop -> Settings -> Docker Engine`
+- добавить в JSON:
+
+```json
+{
+  "insecure-registries": ["83.166.249.64:5000"]
+}
+```
+
+Если в конфиге уже есть другие поля, `insecure-registries` нужно добавить на верхний уровень существующего JSON, а не вставлять внутрь `builder`.
+
+После этого:
+- нажать `Apply & Restart`
+
+Логин в registry:
+
+```bash
+docker login 83.166.249.64:5000 -u <login> -p <password>
+```
+
+Сборка и пуш `index`:
+
+```bash
+cd index
+export TEAM_ID=...
+export LOGIN=...
+export PASSWORD=...
+make push
+```
+
+Сборка и пуш `search`:
+
+```bash
+cd search
+export TEAM_ID=...
+export LOGIN=...
+export PASSWORD=...
+make push
+```
+
+Текущие `Makefile` уже собирают образы с `--platform linux/amd64`, как требует ТЗ.
+
+### Готово для команды `31023`
+
+Если используете выданные значения:
+- `team_id = 31023`
+- `VK login = 3e5bab13da3a6503`
+- `VK password = 92117d7d10c11049cf178236144bddf2`
+
+То полный путь такой:
+
+```bash
+cd /Users/boyjayy/Documents/Search
+
+export OPEN_API_LOGIN='3e5bab13da3a6503'
+export OPEN_API_PASSWORD='92117d7d10c11049cf178236144bddf2'
+
+export LOGIN='3e5bab13da3a6503'
+export PASSWORD='92117d7d10c11049cf178236144bddf2'
+export TEAM_ID='31023'
+```
+
+Локальная проверка перед отправкой:
+
+```bash
+docker compose up --build -d
+python3 eval/ingest.py
+curl -X POST "http://localhost:8002/search" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": {
+      "text": "Что писали про Go 1.18?"
+    }
+  }'
+```
+
+Логин в registry:
+
+```bash
+docker login 83.166.249.64:5000 -u "$LOGIN" -p "$PASSWORD"
+```
+
+Публикация образов:
+
+```bash
+cd /Users/boyjayy/Documents/Search/index
+make push
+
+cd /Users/boyjayy/Documents/Search/search
+make push
+```
+
+В итоге в registry должны оказаться:
+- `83.166.249.64:5000/31023/index-service:latest`
+- `83.166.249.64:5000/31023/search-service:latest`
+
+### Прямой вариант из инструкции хакатона
+
+Если делать без `Makefile`, то команды такие:
+
+Логин:
+
+```bash
+docker login 83.166.249.64:5000 -u "$LOGIN" -p "$PASSWORD"
+```
+
+Сборка:
+
+```bash
+docker build --platform linux/amd64 -t 83.166.249.64:5000/31023/index-service:latest /Users/boyjayy/Documents/Search/index
+docker build --platform linux/amd64 -t 83.166.249.64:5000/31023/search-service:latest /Users/boyjayy/Documents/Search/search
+```
+
+Публикация:
+
+```bash
+docker push 83.166.249.64:5000/31023/index-service:latest
+docker push 83.166.249.64:5000/31023/search-service:latest
 ```

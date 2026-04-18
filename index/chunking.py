@@ -63,6 +63,29 @@ def extract_part_texts(message: Message) -> list[str]:
     return parts_text
 
 
+def render_member_event(message: Message) -> str:
+    if not message.member_event:
+        return ""
+
+    event_type = str(message.member_event.get("type") or "").strip()
+    members = [
+        str(member).strip()
+        for member in (message.member_event.get("members") or [])
+        if str(member).strip()
+    ]
+
+    if not event_type:
+        return ""
+
+    lines = [f"System {event_type} event."]
+    if members:
+        if event_type == "addMembers":
+            lines.append(f"Added members: {', '.join(members)}")
+        else:
+            lines.append(f"Members: {', '.join(members)}")
+    return "\n".join(lines).strip()
+
+
 def render_message(message: Message) -> str:
     content_parts: list[str] = []
 
@@ -73,6 +96,10 @@ def render_message(message: Message) -> str:
     part_texts = extract_part_texts(message)
     if part_texts:
         content_parts.extend(part_texts)
+
+    member_event_text = render_member_event(message)
+    if member_event_text:
+        content_parts.append(member_event_text)
 
     normalized_snippets = normalize_text(message.file_snippets)
     if normalized_snippets:
@@ -239,7 +266,7 @@ def is_message_searchable(message: NormalizedMessage) -> bool:
     if not has_signal:
         return False
 
-    if message.is_system and not (message.file_snippets or message.mentions):
+    if message.is_system and not (message.text or message.file_snippets or message.mentions):
         return False
 
     compact_text = " ".join(message.text.lower().split())
