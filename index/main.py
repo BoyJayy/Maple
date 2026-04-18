@@ -21,10 +21,6 @@ async def health() -> dict[str, str]:
 
 @app.post("/index", response_model=IndexAPIResponse)
 async def index(payload: IndexAPIRequest) -> IndexAPIResponse:
-    chunks = _build_chunks(
-        payload.data.overlap_messages,
-        payload.data.new_messages,
-    )
     return IndexAPIResponse(
         results=build_chunks(
             payload.data.chat,
