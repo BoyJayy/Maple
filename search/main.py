@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any
@@ -168,22 +170,113 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Search Service", version="0.1.0", lifespan=lifespan)
 
 
-# Внутри шаблона dense и rerank берутся из внешних HTTP endpoint'ов,
-# которые предоставляет проверяющая система.
-# Текущий код ниже — минимальный пример search pipeline.
-DENSE_PREFETCH_K = 10
-SPRASE_PREFETCH_K = 30
-RETRIEVE_K = 20
-RERANK_LIMIT = 10
+DENSE_PREFETCH_K = 25
+SPARSE_PREFETCH_K = 35
+RETRIEVE_K = 40
+RERANK_LIMIT = 25
+FINAL_MESSAGE_LIMIT = 50
+MAX_DENSE_QUERIES = 5
+MAX_SPARSE_QUERIES = 3
+WHITESPACE_RE = re.compile(r"\s+")
 
-async def embed_dense(client: httpx.AsyncClient, text: str) -> list[float]:
-    # Dense endpoint ожидает OpenAI-compatible body с input как списком строк.
+
+def normalize_query_text(text: str) -> str:
+    return WHITESPACE_RE.sub(" ", text).strip()
+
+
+def unique_texts(texts: list[str], *, limit: int | None = None) -> list[str]:
+    seen: set[str] = set()
+    items: list[str] = []
+    for text in texts:
+        normalized = normalize_query_text(text)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        items.append(normalized)
+        if limit is not None and len(items) >= limit:
+            break
+    return items
+
+
+def collect_entity_terms(entities: Entities | None) -> list[str]:
+    if entities is None:
+        return []
+
+    values = [
+        *(entities.people or []),
+        *(entities.emails or []),
+        *(entities.documents or []),
+        *(entities.names or []),
+        *(entities.links or []),
+    ]
+    return unique_texts(values)
+
+
+def build_primary_query(question: Question) -> str:
+    return normalize_query_text(question.search_text or question.text)
+
+
+def build_dense_queries(question: Question) -> list[str]:
+    candidates = [
+        question.search_text,
+        question.text,
+        *((question.variants or [])[:3]),
+        *((question.hyde or [])[:2]),
+    ]
+    return unique_texts(candidates, limit=MAX_DENSE_QUERIES)
+
+
+def build_sparse_queries(question: Question) -> list[str]:
+    primary = build_primary_query(question)
+    entity_terms = collect_entity_terms(question.entities)
+    focus_terms = unique_texts(
+        [
+            *(question.keywords or []),
+            *entity_terms,
+            *(question.date_mentions or []),
+            question.asker,
+        ]
+    )
+    exact_focus = " ".join(focus_terms)
+    combined = "\n".join(part for part in [primary, exact_focus] if part)
+    candidates = [
+        combined,
+        exact_focus,
+        question.text,
+    ]
+    return unique_texts(candidates, limit=MAX_SPARSE_QUERIES)
+
+
+def build_rerank_query(question: Question) -> str:
+    return normalize_query_text(question.text or build_primary_query(question))
+
+
+def dedupe_message_ids(message_ids: list[str], *, limit: int) -> list[str]:
+    seen: set[str] = set()
+    unique_ids: list[str] = []
+    for message_id in message_ids:
+        if message_id in seen:
+            continue
+        seen.add(message_id)
+        unique_ids.append(message_id)
+        if len(unique_ids) >= limit:
+            break
+    return unique_ids
+
+
+async def embed_dense_many(
+    client: httpx.AsyncClient,
+    texts: list[str],
+) -> list[list[float]]:
+    if not texts:
+        return []
+
     response = await client.post(
         EMBEDDINGS_DENSE_URL,
         **get_upstream_request_kwargs(),
         json={
             "model": os.getenv("EMBEDDINGS_DENSE_MODEL", EMBEDDINGS_DENSE_MODEL),
-            "input": [text],
+            "input": texts,
         },
     )
     response.raise_for_status()
@@ -192,43 +285,57 @@ async def embed_dense(client: httpx.AsyncClient, text: str) -> list[float]:
     if not payload.data:
         raise ValueError("Dense embedding response is empty")
 
-    return payload.data[0].embedding
+    return [item.embedding for item in sorted(payload.data, key=lambda item: item.index)]
 
 
-async def embed_sparse(text: str) -> SparseVector:
-    vectors = list(get_sparse_model().embed([text]))
+async def embed_sparse_many(texts: list[str]) -> list[SparseVector]:
+    if not texts:
+        return []
+
+    vectors = await asyncio.to_thread(lambda: list(get_sparse_model().embed(texts)))
     if not vectors:
         raise ValueError("Sparse embedding response is empty")
 
-    item = vectors[0]
-    return SparseVector(
-        indices=[int(index) for index in item.indices.tolist()],
-        values=[float(value) for value in item.values.tolist()],
-    )
+    return [
+        SparseVector(
+            indices=[int(index) for index in item.indices.tolist()],
+            values=[float(value) for value in item.values.tolist()],
+        )
+        for item in vectors
+    ]
 
 
 async def qdrant_search(
     client: AsyncQdrantClient,
-    dense_vector: list[float],
-    sparse_vector: SparseVector,
+    dense_vectors: list[list[float]],
+    sparse_vectors: list[SparseVector],
 ) -> Any | None:
+    prefetch: list[models.Prefetch] = [
+        models.Prefetch(
+            query=dense_vector,
+            using=QDRANT_DENSE_VECTOR_NAME,
+            limit=DENSE_PREFETCH_K,
+        )
+        for dense_vector in dense_vectors
+    ]
+    prefetch.extend(
+        models.Prefetch(
+            query=models.SparseVector(
+                indices=sparse_vector.indices,
+                values=sparse_vector.values,
+            ),
+            using=QDRANT_SPARSE_VECTOR_NAME,
+            limit=SPARSE_PREFETCH_K,
+        )
+        for sparse_vector in sparse_vectors
+    )
+
+    if not prefetch:
+        return None
+
     response = await client.query_points(
         collection_name=QDRANT_COLLECTION_NAME,
-        prefetch=[
-            models.Prefetch(
-                query=dense_vector,
-                using=QDRANT_DENSE_VECTOR_NAME,
-                limit=DENSE_PREFETCH_K,
-            ),
-            models.Prefetch(
-                query=models.SparseVector(
-                    indices=sparse_vector.indices,
-                    values=sparse_vector.values,
-                ),
-                using=QDRANT_SPARSE_VECTOR_NAME,
-                limit=SPRASE_PREFETCH_K,
-            ),
-        ],
+        prefetch=prefetch,
         query=models.FusionQuery(fusion=models.Fusion.RRF),
         limit=RETRIEVE_K,
         with_payload=True,
@@ -280,7 +387,7 @@ async def rerank_points(
     query: str,
     points: list[Any],
 ) -> list[Any]:
-    rerank_candidates = points[:10]
+    rerank_candidates = points[:RERANK_LIMIT]
     rerank_targets = [point.payload.get("page_content") for point in rerank_candidates]
     scores = await get_rerank_scores(client, query, rerank_targets)
 
@@ -304,28 +411,38 @@ async def health() -> dict[str, str]:
 
 @app.post("/search", response_model=SearchAPIResponse)
 async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
-    query = payload.question.text.strip()
-    if not query:
+    primary_query = build_primary_query(payload.question)
+    if not primary_query:
         raise HTTPException(status_code=400, detail="question.text is required")
 
     client: httpx.AsyncClient = app.state.http
     qdrant: AsyncQdrantClient = app.state.qdrant
 
-    dense_vector = await embed_dense(client, query)
-    sparse_vector = await embed_sparse(query)
-    best_points = await qdrant_search(qdrant, dense_vector, sparse_vector)
+    dense_queries = build_dense_queries(payload.question)
+    sparse_queries = build_sparse_queries(payload.question)
+
+    dense_vectors, sparse_vectors = await asyncio.gather(
+        embed_dense_many(client, dense_queries),
+        embed_sparse_many(sparse_queries),
+    )
+    best_points = await qdrant_search(qdrant, dense_vectors, sparse_vectors)
 
     if best_points is None:
         return SearchAPIResponse(results=[])
 
-    best_points = await rerank_points(client, query, list(best_points))
+    rerank_query = build_rerank_query(payload.question)
+    best_points = await rerank_points(client, rerank_query, list(best_points))
 
-    message_ids: list[str] = [] 
+    message_ids: list[str] = []
     for point in best_points:
         message_ids += extract_message_ids(point)
 
+    final_message_ids = dedupe_message_ids(message_ids, limit=FINAL_MESSAGE_LIMIT)
+    if not final_message_ids:
+        return SearchAPIResponse(results=[])
+
     return SearchAPIResponse(
-        results=[SearchAPIItem(message_ids=message_ids)]
+        results=[SearchAPIItem(message_ids=final_message_ids)]
     )
 
 

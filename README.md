@@ -12,6 +12,7 @@
 
 - [api.md](api.md) — контракт всех endpoint'ов и внешних API.
 - [docs/index_service.md](docs/index_service.md) — устройство текущего `index` и его модули.
+- [docs/search_service.md](docs/search_service.md) — устройство текущего `search` и его retrieval pipeline.
 - [docs/process.md](docs/process.md) — полный процесс от входного JSON до финального поиска.
 - [hackathon_roadmap.md](hackathon_roadmap.md) — roadmap по доработке решения.
 
@@ -36,6 +37,14 @@
 - режет очень длинные обычные сообщения на большие смысловые части;
 - формирует разные `page_content`, `dense_content`, `sparse_content`;
 - сохраняет корректные `message_ids`.
+
+Текущий `search` уже использует enriched question заметно сильнее baseline:
+- берёт `search_text` как primary query;
+- использует несколько dense queries из `text`, `search_text`, `variants`, `hyde`;
+- использует несколько sparse queries из `keywords`, `entities`, `date_mentions`, `asker`;
+- объединяет retrieval через `RRF`;
+- делает rerank top-кандидатов;
+- дедуплицирует `message_ids` и ограничивает выдачу top-50.
 
 ## Что менять можно
 
