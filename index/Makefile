@@ -3,6 +3,7 @@ PASSWORD ?=
 TEAM_ID ?= 
 DOCKER_REGISTRY_URL ?= 83.166.249.64:5000
 PORT ?= 8000
+PLATFORM ?= linux/amd64
 
 IMAGE = $(DOCKER_REGISTRY_URL)/$(TEAM_ID)/index-service:latest
 
@@ -15,7 +16,7 @@ login:
 
 build:
 	@: $(if $(TEAM_ID),,$(error TEAM_ID is required for make build))
-	docker build -t $(IMAGE) ./
+	docker build --platform $(PLATFORM) -t $(IMAGE) ./
 
 run: build
 	docker run --rm -p $(PORT):8000 $(IMAGE)

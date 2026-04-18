@@ -173,7 +173,8 @@ app = FastAPI(title="Search Service", version="0.1.0", lifespan=lifespan)
 DENSE_PREFETCH_K = 25
 SPARSE_PREFETCH_K = 35
 RETRIEVE_K = 40
-RERANK_LIMIT = 25
+RERANK_LIMIT = 8
+RERANK_MAX_TEXT_CHARS = 1200
 FINAL_MESSAGE_LIMIT = 50
 MAX_DENSE_QUERIES = 5
 MAX_SPARSE_QUERIES = 3
@@ -262,6 +263,13 @@ def dedupe_message_ids(message_ids: list[str], *, limit: int) -> list[str]:
         if len(unique_ids) >= limit:
             break
     return unique_ids
+
+
+def trim_rerank_text(text: str, *, limit: int) -> str:
+    normalized = normalize_query_text(text)
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit].rstrip()} ..."
 
 
 async def embed_dense_many(
@@ -387,9 +395,26 @@ async def rerank_points(
     query: str,
     points: list[Any],
 ) -> list[Any]:
+    if not points:
+        return []
+
     rerank_candidates = points[:RERANK_LIMIT]
-    rerank_targets = [point.payload.get("page_content") for point in rerank_candidates]
-    scores = await get_rerank_scores(client, query, rerank_targets)
+    untouched_tail = points[RERANK_LIMIT:]
+    rerank_targets = [
+        trim_rerank_text(str((point.payload or {}).get("page_content") or ""), limit=RERANK_MAX_TEXT_CHARS)
+        for point in rerank_candidates
+    ]
+
+    try:
+        scores = await get_rerank_scores(client, query, rerank_targets)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            logger.warning(
+                "Reranker rate-limited the request; using retrieval order fallback for %s candidates",
+                len(rerank_candidates),
+            )
+            return points
+        raise
 
     reranked_candidates = [
         point
@@ -400,7 +425,7 @@ async def rerank_points(
         )
     ]
 
-    return reranked_candidates
+    return reranked_candidates + untouched_tail
 
 
 # Ваш сервис должен имплементировать оба этих метода
