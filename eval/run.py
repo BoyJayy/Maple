@@ -15,7 +15,6 @@ import statistics
 from pathlib import Path
 
 import httpx
-
 from metrics import ndcg_at_k, recall_at_k, score
 
 SEARCH_URL = os.getenv("SEARCH_URL", "http://localhost:8002")

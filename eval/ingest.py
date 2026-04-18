@@ -112,7 +112,7 @@ def main() -> None:
     chunks = r.json()["results"]
     print(f"      -> {len(chunks)} chunks")
 
-    print(f"[2/4] POST /sparse_embedding  (batch)")
+    print("[2/4] POST /sparse_embedding  (batch)")
     r = http.post(
         f"{INDEX_URL}/sparse_embedding",
         json={"texts": [c["sparse_content"] for c in chunks]},

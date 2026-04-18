@@ -18,6 +18,23 @@ ignore = [
     "FBT",
     "ANN",
     "BLE001",
+    "RUF003", # ambiguous unicode in Russian comments (false positives)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# eval/* — CLI-скрипты, print и длинные сообщения в исключениях уместны
+"eval/*" = [
+    "T201",   # print
+    "INP001", # missing __init__.py
+    "TRY003", # long exception messages
+    "EM101",  # raw string in exception
+    "EM102",  # f-string in exception
+    "S101",   # assert
+    "PLC0415", # import outside top-level
+    "PERF401", # manual list comprehension
+    "ARG001", # unused function argument
+    "SIM103", # needless bool
+    "RET504", # unnecessary assign
 ]
 
 [dependency-groups]
