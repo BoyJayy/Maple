@@ -52,12 +52,11 @@ def build_chunks(
     for group in groups:
         if not any(m.id in new_ids for m, _ in group):
             continue
-        rendered_texts = [t for _, t in group]
         chunks.append(
             ChunkResult(
-                page_content=build_page_content(rendered_texts),
-                dense_content=build_dense_content(rendered_texts),
-                sparse_content=build_sparse_content(rendered_texts),
+                page_content=build_page_content(group),
+                dense_content=build_dense_content(group),
+                sparse_content=build_sparse_content(group),
                 message_ids=[m.id for m, _ in group],
             )
         )

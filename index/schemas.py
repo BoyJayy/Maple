@@ -14,8 +14,10 @@ class MessageLike(Protocol):
     thread_sn: str | None
     time: int
     text: str
+    sender_id: str
     file_snippets: str
     parts: list[dict[str, Any]] | None
+    mentions: list[str] | None
     is_system: bool
     is_hidden: bool
 
