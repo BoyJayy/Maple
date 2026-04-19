@@ -612,7 +612,6 @@ async def get_rerank_scores(
     if not missing_targets:
         return [score for score in results if score is not None]
 
-    # Rerank endpoint возвращает score для пары query -> candidate text.
     response = await post_upstream_json(
         client,
         RERANKER_URL,

@@ -5,7 +5,6 @@ from typing import Any
 
 EMBEDDINGS_DENSE_MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
-# Ваш сервис должен считывать эти переменные из окружения (env), так как проверяющая система управляет ими
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8003"))
 

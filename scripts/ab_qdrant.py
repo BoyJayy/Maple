@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "eval"))
-from metrics import ndcg_at_k, recall_at_k, score  # noqa: E402
+from metrics import ndcg_at_k, recall_at_k, score
 
 SEARCH_URL = "http://localhost:8002"
 

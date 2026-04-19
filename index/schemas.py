@@ -7,7 +7,7 @@ class Chat(BaseModel):
     id: str
     name: str
     sn: str
-    type: str  # group, channel, private
+    type: str
     is_public: bool | None = None
     members_count: int | None = None
     members: list[dict[str, Any]] | None = None

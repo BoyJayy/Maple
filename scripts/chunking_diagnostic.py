@@ -16,8 +16,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "index"))
 
-from chunking import build_chunks, is_message_searchable, normalize_message  # noqa: E402
-from schemas import Chat, Message  # noqa: E402
+from chunking import build_chunks, is_message_searchable, normalize_message
+from schemas import Chat, Message
 
 
 def histogram(values: list[int], bins: list[tuple[int, int]]) -> Counter[int]:

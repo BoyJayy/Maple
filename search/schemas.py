@@ -57,10 +57,9 @@ class SparseEmbeddingResponse(BaseModel):
     vectors: list[SparseVector]
 
 
-# Метадата чанков в Qdrant'e, по которой вы можете фильтровать
 class ChunkMetadata(BaseModel):
     chat_name: str
-    chat_type: str  # channel, group, private, thread
+    chat_type: str
     chat_id: str
     chat_sn: str
     thread_sn: str | None = None
