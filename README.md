@@ -151,6 +151,17 @@ python3 scripts/chunking_diagnostic.py data/Go\ Nova.json
 - `dup_ratio`;
 - короткий preview каждого chunk.
 
+Для более тяжёлого подбора chunking-параметров есть sweep-инструмент:
+
+```bash
+python3 scripts/build_ts_chat.py
+python3 scripts/sweep_chunking.py --phase smoke
+python3 scripts/sweep_chunking.py --phase custom --combo '{"MAX_CHUNK_CHARS": 1200}'
+```
+
+Он гоняет цикл `restart index -> ingest -> eval` и пишет CSV в `results/chunking_sweep/`.
+Креды скрипт берёт только из окружения.
+
 ## Внешний dense/rerank API
 
 Хакатонный внешний API:

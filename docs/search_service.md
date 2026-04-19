@@ -143,6 +143,21 @@ Sparse queries тоже считаются батчем.
 
 Это позволяет гонять search-only sweep без пересборки образа и без re-ingest.
 
+Для локального A/B есть dev endpoint `POST /_debug/search`.
+Он не меняет публичный контракт `/search`, но умеет вернуть промежуточные стадии:
+- `retrieval`;
+- `rescored`;
+- `reranked`;
+- `final`.
+
+Скрипт [`eval/run.py`](/Users/boyjayy/Documents/Search/eval/run.py) поддерживает `--stages` и считает метрики по этим стадиям:
+
+```bash
+python3 eval/run.py --dataset data/dataset_ts.jsonl --k 50 --stages
+```
+
+Для быстрого сравнения fusion/query-count ручек есть [`scripts/ab_qdrant.py`](/Users/boyjayy/Documents/Search/scripts/ab_qdrant.py).
+
 ## 4. Rerank
 
 Перед внешним rerank сервис делает мягкий local rescoring кандидатов.
@@ -155,6 +170,8 @@ Sparse queries тоже считаются батчем.
 - для quoted message-block сильнее доверяет собственной реплике, чем процитированному тексту;
 - metadata сигналы по `participants` и `mentions`;
 - мягкий temporal boost, если есть `date_range`.
+
+Внутри одного запроса сервис собирает `QueryContext`: нормализованные phrase/token/entity/date сигналы считаются один раз и переиспользуются в rescoring, rerank и final assembly.
 
 При этом rescoring сейчас осознанно сильнее смотрит на секцию `MESSAGES`, чем на `CONTEXT`.
 Это важно, потому что overlap-контекст часто полезен для retrieval, но может мешать ранжированию:
@@ -186,6 +203,9 @@ Sparse queries тоже считаются батчем.
 - после ответа reranker использует local boost как мягкий stabilizer для exact/entity-heavy кейсов;
 - смешивает score reranker с исходным retrieval-порядком через `RERANK_ALPHA`;
 - пересортировывает кандидаты по blended score.
+
+`rescore_points()` возвращает не только отсортированные кандидаты, но и `boost_map`.
+Rerank переиспользует эти local boost значения, чтобы не пересчитывать один и тот же сигнал второй раз.
 
 Это повышает качество первых позиций, а значит и `nDCG@50`.
 

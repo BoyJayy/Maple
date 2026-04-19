@@ -323,6 +323,12 @@ Reranker получает:
 
 Для тюнинга chunking в репозитории есть отдельный dev-инструмент:
 - [`scripts/chunking_diagnostic.py`](/Users/boyjayy/Documents/Search/scripts/chunking_diagnostic.py)
+- [`scripts/build_ts_chat.py`](/Users/boyjayy/Documents/Search/scripts/build_ts_chat.py)
+- [`scripts/sweep_chunking.py`](/Users/boyjayy/Documents/Search/scripts/sweep_chunking.py)
+
+`chunking_diagnostic.py` показывает форму чанков без полного ingest.
+`build_ts_chat.py` нужен только для локальной диагностики: он делает chat-shaped JSON из eval JSONL, чтобы прогнать настоящий `/index` path.
+`sweep_chunking.py` гоняет полный цикл `index -> ingest -> eval` для разных env-параметров chunking и пишет CSV в `results/chunking_sweep/`.
 
 ## 14. Как это сделано локально сейчас
 
@@ -342,7 +348,8 @@ POST /index
 Что в нём важно:
 - dense embeddings считаются батчами;
 - point id детерминирован и учитывает не только `message_ids`, но и содержимое chunk'а;
-- перед upsert удаляются старые точки этого же чата, чтобы повторный ingest не оставлял stale data после смены chunking.
+- перед upsert удаляются старые точки этого же чата, чтобы повторный ingest не оставлял stale data после смены chunking;
+- upsert выполняется с `wait=True`, чтобы следующий eval не стартовал до фиксации точек в Qdrant.
 
 Для synthetic eval-корпусов в формате JSONL этот же скрипт умеет работать без `POST /index`:
 - берёт `answer.text` как synthetic document;
