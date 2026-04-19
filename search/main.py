@@ -503,6 +503,29 @@ def score_intent_alignment(question: Question, text: str) -> float:
     return 0.0
 
 
+def score_structural_message_fit(question: Question, text: str) -> float:
+    intent = detect_query_intent(question)
+    lowered = normalize_query_text(text).lower()
+    if not lowered:
+        return 0.0
+
+    summary_like = is_summary_like_text(lowered)
+    if intent == "detail":
+        if summary_like:
+            return -0.03
+        if len(lowered) <= 220:
+            return 0.05
+        if len(lowered) <= 320:
+            return 0.03
+        if len(lowered) <= 500:
+            return 0.01
+
+    if intent == "summary" and summary_like:
+        return 0.02
+
+    return 0.0
+
+
 def parse_timestamp(value: Any, *, end_of_day: bool = False) -> int | None:
     if value is None or value == "":
         return None
@@ -1004,6 +1027,7 @@ def score_message_block(
 
     block_score = own_score + quoted_score
     block_score += score_intent_alignment(question, own_text)
+    block_score += score_structural_message_fit(question, own_text)
     if len(own_text) <= 220 and block_score > 0:
         block_score += 0.03
     if query_prefers_earliest_message(question) and quote_flag and own_score == 0 and quoted_score > 0:
