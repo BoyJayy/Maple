@@ -79,9 +79,6 @@ Primary query сейчас строится как:
 - поймать смысловые перефразировки;
 - использовать enriched question как источник recall.
 
-Для plain-вопросов без `keywords` / `hyde` сервис добавляет небольшие domain expansions по известным техническим темам: Go 1.18, SIGABRT/macOS, CGO, PDF/OCR, Qdrant, oncall, release smoke-check, migrations, Terraform provider, demo и technology cards.
-Это recall-oriented слой: он помогает найти ответ, когда вопрос содержит тему, а сам ответ содержит только факты.
-
 ### Sparse queries
 
 Для sparse retrieval сервис строит keyword-heavy запросы из:

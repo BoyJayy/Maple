@@ -326,45 +326,10 @@ def build_primary_query(question: Question) -> str:
     return normalize_query_text(question.search_text or question.text)
 
 
-def build_domain_expansions(question: Question) -> list[str]:
-    text = normalize_query_text(" ".join([question.text, question.search_text])).lower()
-    expansions: list[str] = []
-
-    if "go 1.18" in text or "go1.18" in text:
-        expansions.append("Go 1.18 generics fuzzing TryLock sync пакет")
-    if "dc rules" in text or ("линтер" in text and "go" in text):
-        expansions.append("DC rules линтер context propagation time.Sleep HTTP handlers")
-    if "sigabrt" in text or "crypto/x509" in text:
-        expansions.append("SIGABRT crypto/x509 MacBook Air M1 Go 1.17.3")
-    if "qdrant" in text and ("latency" in text or "p95" in text):
-        expansions.append("Qdrant latency p95 1.8s compaction upsert batch")
-    if ("ocr" in text or "pdf" in text) and ("поиск" in text or "приказ" in text):
-        expansions.append("OCR PDF lang=rus+eng страницы 4Mb PDF Search Strategy")
-    if "cgo" in text and ("linux" in text or "сборк" in text):
-        expansions.append("CGO Linux-only библиотека CGO Cross Build Guide")
-    if "oncall" in text or "алерт" in text:
-        expansions.append("oncall rota alerts Oncall Runbook")
-    if ("release" in text or "релиз" in text or "smoke" in text) and (
-        "search-service" in text or "v2.1" in text
-    ):
-        expansions.append("search-service v2.1 smoke /health /search eval harness sparse embedding Release Checklist")
-    if "terraform provider" in text:
-        expansions.append("Terraform provider workshop Terraform Provider Workshop")
-    if "миграц" in text and ("go" in text or "структур" in text):
-        expansions.append("Go migrations goose create migrations cmd/migrations Migration Layout Decision")
-    if "демо" in text and "жюри" in text:
-        expansions.append("демо жюри 7 минут ingest retrieval rerank metrics Hackathon Demo Script")
-    if "карточ" in text and "технолог" in text:
-        expansions.append("карточки технологий интранет Technology Cards Proposal")
-
-    return unique_texts(expansions)
-
-
 def build_dense_queries(question: Question) -> list[str]:
     candidates = [
         question.search_text,
         question.text,
-        *build_domain_expansions(question),
         *((question.variants or [])[:4]),
         *((question.hyde or [])[:3]),
     ]
@@ -388,7 +353,6 @@ def build_sparse_queries(question: Question) -> list[str]:
         combined,
         exact_focus,
         " ".join(entity_terms),
-        *build_domain_expansions(question),
         primary,
         question.text,
         *((question.variants or [])[:2]),

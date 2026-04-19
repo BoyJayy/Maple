@@ -172,7 +172,6 @@ sparse_content
 - `text`
 - часть `variants`
 - часть `hyde`
-- domain expansions для plain-вопросов по известным техническим темам: Go 1.18, SIGABRT/macOS, CGO, PDF/OCR, Qdrant, oncall, release smoke-check, migrations, Terraform provider, demo и technology cards
 
 Потом они батчем отправляются во внешний dense API:
 
