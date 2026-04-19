@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
@@ -480,6 +481,36 @@ def is_summary_like_text(text: str) -> bool:
     return "документ" in lowered and ("http" in lowered or "https" in lowered)
 
 
+@dataclass(frozen=True)
+class QueryContext:
+    question: Question
+    phrase_terms: tuple[str, ...]
+    token_terms: tuple[str, ...]
+    identity_terms: frozenset[str]
+    intent: str
+    prefers_earliest: bool
+    query_start: int | None
+    query_end: int | None
+
+
+def build_query_context(question: Question) -> QueryContext:
+    query_start = query_end = None
+    if question.date_range is not None:
+        query_start = parse_timestamp(question.date_range.from_)
+        query_end = parse_timestamp(question.date_range.to, end_of_day=True)
+
+    return QueryContext(
+        question=question,
+        phrase_terms=tuple(build_phrase_terms(question)),
+        token_terms=tuple(build_query_signal_tokens(question)),
+        identity_terms=frozenset(normalize_terms([question.asker, *collect_entity_terms(question.entities)])),
+        intent=detect_query_intent(question),
+        prefers_earliest=query_prefers_earliest_message(question),
+        query_start=query_start,
+        query_end=query_end,
+    )
+
+
 def score_intent_alignment(question: Question, text: str) -> float:
     if INTENT_ALIGNMENT_WEIGHT <= 0:
         return 0.0
@@ -499,29 +530,6 @@ def score_intent_alignment(question: Question, text: str) -> float:
         if not summary_like and len(lowered) <= 220:
             score += 0.02
         return score * INTENT_ALIGNMENT_WEIGHT
-
-    return 0.0
-
-
-def score_structural_message_fit(question: Question, text: str) -> float:
-    intent = detect_query_intent(question)
-    lowered = normalize_query_text(text).lower()
-    if not lowered:
-        return 0.0
-
-    summary_like = is_summary_like_text(lowered)
-    if intent == "detail":
-        if summary_like:
-            return -0.03
-        if len(lowered) <= 220:
-            return 0.05
-        if len(lowered) <= 320:
-            return 0.03
-        if len(lowered) <= 500:
-            return 0.01
-
-    if intent == "summary" and summary_like:
-        return 0.02
 
     return 0.0
 
@@ -656,13 +664,7 @@ def score_text_signals(
     return min(phrase_boost, 0.24) + min(token_boost, 0.08)
 
 
-def score_best_message_block(
-    question: Question,
-    point: Any,
-    *,
-    phrase_terms: list[str],
-    token_terms: list[str],
-) -> float:
+def score_best_message_block(ctx: QueryContext, point: Any) -> float:
     page_content = str(get_point_payload(point).get("page_content") or "")
     blocks = collapse_message_blocks(extract_message_blocks(page_content))
     if not blocks:
@@ -679,16 +681,16 @@ def score_best_message_block(
 
         own_score = score_text_signals(
             own_text,
-            phrase_terms=phrase_terms,
-            token_terms=token_terms,
+            phrase_terms=ctx.phrase_terms,
+            token_terms=ctx.token_terms,
         )
         quoted_score = 0.0
         if quote_flag and quoted_text:
             quoted_score = min(
                 score_text_signals(
                     quoted_text,
-                    phrase_terms=phrase_terms,
-                    token_terms=token_terms,
+                    phrase_terms=ctx.phrase_terms,
+                    token_terms=ctx.token_terms,
                 )
                 * 0.2,
                 0.05,
@@ -705,7 +707,7 @@ def score_best_message_block(
 def score_metadata_signals(
     metadata: dict[str, Any],
     *,
-    identity_terms: set[str],
+    identity_terms: set[str] | frozenset[str],
 ) -> float:
     if not identity_terms:
         return 0.0
@@ -718,40 +720,29 @@ def score_metadata_signals(
     return min(participant_hits * 0.03, 0.06) + min(mention_hits * 0.04, 0.08)
 
 
-def score_temporal_signal(question: Question, metadata: dict[str, Any]) -> float:
-    if question.date_range is None:
+def score_temporal_signal(ctx: QueryContext, metadata: dict[str, Any]) -> float:
+    if ctx.query_start is None or ctx.query_end is None:
         return 0.0
 
-    query_start = parse_timestamp(question.date_range.from_)
-    query_end = parse_timestamp(question.date_range.to, end_of_day=True)
     point_start = parse_timestamp(metadata.get("start"))
     point_end = parse_timestamp(metadata.get("end"))
 
-    if None in {query_start, query_end, point_start, point_end}:
+    if point_start is None or point_end is None:
         return 0.0
 
-    if point_end < query_start or point_start > query_end:
+    if point_end < ctx.query_start or point_start > ctx.query_end:
         return 0.0
 
     return 0.06
 
 
-def compute_local_boost(question: Question, point: Any) -> float:
-    phrase_terms = build_phrase_terms(question)
-    token_terms = build_query_signal_tokens(question)
-    identity_terms = set(normalize_terms([question.asker, *collect_entity_terms(question.entities)]))
-
+def compute_local_boost(ctx: QueryContext, point: Any) -> float:
     message_text = get_point_message_text(point)
     context_text = get_point_context_text(point)
     metadata = get_point_metadata(point)
-    message_score = score_text_signals(message_text, phrase_terms=phrase_terms, token_terms=token_terms)
-    context_score = score_text_signals(context_text, phrase_terms=phrase_terms, token_terms=token_terms)
-    best_block_score = score_best_message_block(
-        question,
-        point,
-        phrase_terms=phrase_terms,
-        token_terms=token_terms,
-    )
+    message_score = score_text_signals(message_text, phrase_terms=ctx.phrase_terms, token_terms=ctx.token_terms)
+    context_score = score_text_signals(context_text, phrase_terms=ctx.phrase_terms, token_terms=ctx.token_terms)
+    best_block_score = score_best_message_block(ctx, point)
     context_penalty = 0.0
     if context_score > 0 and message_score == 0 and best_block_score == 0:
         context_penalty = 0.08
@@ -760,25 +751,27 @@ def compute_local_boost(question: Question, point: Any) -> float:
         message_score
         + min(context_score * 0.2, 0.05)
         + best_block_score
-        + score_intent_alignment(question, message_text)
-        + score_metadata_signals(metadata, identity_terms=identity_terms)
-        + score_temporal_signal(question, metadata)
+        + score_intent_alignment(ctx.question, message_text)
+        + score_metadata_signals(metadata, identity_terms=ctx.identity_terms)
+        + score_temporal_signal(ctx, metadata)
         - context_penalty
     )
 
 
-def rescore_points(question: Question, points: list[Any]) -> list[Any]:
+def rescore_points(ctx: QueryContext, points: list[Any]) -> tuple[list[Any], dict[Any, float]]:
     if not points:
-        return []
+        return [], {}
 
+    boost_map: dict[Any, float] = {}
     rescored: list[tuple[float, float, int, Any]] = []
     for index, point in enumerate(points):
-        local_boost = compute_local_boost(question, point)
+        local_boost = compute_local_boost(ctx, point)
+        boost_map[point.id] = local_boost
         base_score = float(getattr(point, "score", 0.0) or 0.0)
         rescored.append((base_score + local_boost, local_boost, -index, point))
 
     rescored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-    return [point for _, _, _, point in rescored]
+    return [point for _, _, _, point in rescored], boost_map
 
 
 async def embed_dense_many(
@@ -885,6 +878,8 @@ async def qdrant_search(
     client: AsyncQdrantClient,
     dense_vectors: list[list[float]],
     sparse_vectors: list[SparseVector],
+    *,
+    fusion: str = "dbsf",
 ) -> Any | None:
     prefetch: list[models.Prefetch] = [
         models.Prefetch(
@@ -909,10 +904,15 @@ async def qdrant_search(
     if not prefetch:
         return None
 
+    fusion_mode = {
+        "rrf": models.Fusion.RRF,
+        "dbsf": models.Fusion.DBSF,
+    }.get(fusion.lower(), models.Fusion.RRF)
+
     response = await client.query_points(
         collection_name=QDRANT_COLLECTION_NAME,
         prefetch=prefetch,
-        query=models.FusionQuery(fusion=models.Fusion.RRF),
+        query=models.FusionQuery(fusion=fusion_mode),
         limit=RETRIEVE_K,
         with_payload=True,
     )
@@ -963,7 +963,7 @@ def collapse_message_blocks(blocks: list[str]) -> list[str]:
     return grouped
 
 
-def reorder_message_ids_for_point(question: Question, point: Any) -> list[str]:
+def reorder_message_ids_for_point(ctx: QueryContext, point: Any) -> list[str]:
     message_ids = extract_message_ids(point)
     if len(message_ids) <= 1:
         return message_ids
@@ -973,19 +973,15 @@ def reorder_message_ids_for_point(question: Question, point: Any) -> list[str]:
     if len(blocks) != len(message_ids):
         return message_ids
 
-    phrase_terms = build_phrase_terms(question)
-    token_terms = build_query_signal_tokens(question)
-    prefer_earliest = query_prefers_earliest_message(question)
-
     scored = []
     for index, (message_id, block) in enumerate(zip(message_ids, blocks, strict=True)):
         block_text = normalize_query_text(block).lower()
         block_score = score_text_signals(
             block_text,
-            phrase_terms=phrase_terms,
-            token_terms=token_terms,
+            phrase_terms=ctx.phrase_terms,
+            token_terms=ctx.token_terms,
         )
-        if prefer_earliest:
+        if ctx.prefers_earliest:
             block_score += max(0.0, 0.04 - index * 0.01)
         scored.append((block_score, -index, message_id))
 
@@ -993,14 +989,7 @@ def reorder_message_ids_for_point(question: Question, point: Any) -> list[str]:
     return [message_id for _, _, message_id in scored]
 
 
-def score_message_block(
-    question: Question,
-    block: str,
-    *,
-    message_index: int,
-) -> float:
-    phrase_terms = build_phrase_terms(question)
-    token_terms = build_query_signal_tokens(question)
+def score_message_block(ctx: QueryContext, block: str, *, message_index: int) -> float:
     header, body = split_block_header_body(block)
     own_body, quoted_body = split_quoted_text(body)
     quote_flag = block_has_flag(block, "quote")
@@ -1010,34 +999,33 @@ def score_message_block(
 
     own_score = score_text_signals(
         own_text,
-        phrase_terms=phrase_terms,
-        token_terms=token_terms,
+        phrase_terms=ctx.phrase_terms,
+        token_terms=ctx.token_terms,
     )
     quoted_score = 0.0
     if quote_flag and quoted_text:
         quoted_score = min(
             score_text_signals(
                 quoted_text,
-                phrase_terms=phrase_terms,
-                token_terms=token_terms,
+                phrase_terms=ctx.phrase_terms,
+                token_terms=ctx.token_terms,
             )
             * 0.2,
             0.05,
         )
 
     block_score = own_score + quoted_score
-    block_score += score_intent_alignment(question, own_text)
-    block_score += score_structural_message_fit(question, own_text)
+    block_score += score_intent_alignment(ctx.question, own_text)
     if len(own_text) <= 220 and block_score > 0:
         block_score += 0.03
-    if query_prefers_earliest_message(question) and quote_flag and own_score == 0 and quoted_score > 0:
+    if ctx.prefers_earliest and quote_flag and own_score == 0 and quoted_score > 0:
         block_score -= 0.05
-    if query_prefers_earliest_message(question):
+    if ctx.prefers_earliest:
         block_score += max(0.0, 0.04 - message_index * 0.01)
     return block_score
 
 
-def assemble_message_ids(question: Question, points: list[Any], *, limit: int) -> list[str]:
+def assemble_message_ids(ctx: QueryContext, points: list[Any], *, limit: int) -> list[str]:
     scored_messages: list[tuple[float, int, int, str]] = []
 
     for point_index, point in enumerate(points):
@@ -1048,11 +1036,11 @@ def assemble_message_ids(question: Question, points: list[Any], *, limit: int) -
 
         if len(blocks) == len(message_ids) and blocks:
             for message_index, (message_id, block) in enumerate(zip(message_ids, blocks, strict=True)):
-                block_score = score_message_block(question, block, message_index=message_index)
+                block_score = score_message_block(ctx, block, message_index=message_index)
                 scored_messages.append((point_bonus + block_score, -point_index, -message_index, message_id))
             continue
 
-        for message_index, message_id in enumerate(reorder_message_ids_for_point(question, point)):
+        for message_index, message_id in enumerate(reorder_message_ids_for_point(ctx, point)):
             fallback_bonus = max(0.0, point_bonus - message_index * 0.01)
             scored_messages.append((fallback_bonus, -point_index, -message_index, message_id))
 
@@ -1115,9 +1103,10 @@ async def get_rerank_scores(
 
 async def rerank_points(
     client: httpx.AsyncClient,
-    question: Question,
+    ctx: QueryContext,
     query: str,
     points: list[Any],
+    boost_map: dict[Any, float],
 ) -> list[Any]:
     if not points:
         return []
@@ -1167,7 +1156,10 @@ async def rerank_points(
     total_candidates = max(len(rerank_candidates), 1)
     for index, (score, point) in enumerate(zip(scores, rerank_candidates, strict=True)):
         retrieval_rank_score = 1.0 - (index / total_candidates)
-        rerank_score = score + compute_local_boost(question, point)
+        local_boost = boost_map.get(point.id)
+        if local_boost is None:
+            local_boost = compute_local_boost(ctx, point)
+        rerank_score = score + local_boost
         blended_score = (RERANK_ALPHA * rerank_score) + ((1.0 - RERANK_ALPHA) * retrieval_rank_score)
         scored_candidates.append((blended_score, rerank_score, retrieval_rank_score, -index, point))
 
@@ -1189,8 +1181,16 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/search", response_model=SearchAPIResponse)
-async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
+async def run_search_pipeline(
+    payload: SearchAPIRequest,
+    *,
+    skip_rescore: bool = False,
+    skip_rerank: bool = False,
+    collect_stages: bool = False,
+    fusion: str = "dbsf",
+    max_dense: int | None = None,
+    max_sparse: int | None = None,
+) -> tuple[list[str], dict[str, list[str]]]:
     primary_query = build_primary_query(payload.question)
     if not primary_query:
         raise HTTPException(status_code=400, detail="question.text is required")
@@ -1198,32 +1198,81 @@ async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
     client: httpx.AsyncClient = app.state.http
     qdrant: AsyncQdrantClient = app.state.qdrant
 
+    ctx = build_query_context(payload.question)
     dense_queries = build_dense_queries(payload.question)
     sparse_queries = build_sparse_queries(payload.question)
+    if max_dense is not None:
+        dense_queries = dense_queries[: max(0, max_dense)]
+    if max_sparse is not None:
+        sparse_queries = sparse_queries[: max(0, max_sparse)]
 
     dense_vectors, sparse_vectors = await asyncio.gather(
         embed_dense_many_safe(client, dense_queries),
         embed_sparse_many(sparse_queries),
     )
     if not dense_vectors and not sparse_vectors:
-        return SearchAPIResponse(results=[])
+        return [], {}
 
-    best_points = await qdrant_search(qdrant, dense_vectors, sparse_vectors)
+    best_points = await qdrant_search(qdrant, dense_vectors, sparse_vectors, fusion=fusion)
 
     if best_points is None:
-        return SearchAPIResponse(results=[])
+        return [], {}
 
-    best_points = rescore_points(payload.question, list(best_points))
-    rerank_query = build_rerank_query(payload.question)
-    best_points = await rerank_points(client, payload.question, rerank_query, best_points)
+    stages: dict[str, list[str]] = {}
+    best_points = list(best_points)
+    if collect_stages:
+        stages["retrieval"] = assemble_message_ids(ctx, best_points, limit=FINAL_MESSAGE_LIMIT)
 
-    final_message_ids = assemble_message_ids(payload.question, best_points, limit=FINAL_MESSAGE_LIMIT)
+    if skip_rescore:
+        boost_map: dict[Any, float] = {}
+    else:
+        best_points, boost_map = rescore_points(ctx, best_points)
+        if collect_stages:
+            stages["rescored"] = assemble_message_ids(ctx, best_points, limit=FINAL_MESSAGE_LIMIT)
+
+    if not skip_rerank:
+        rerank_query = build_rerank_query(payload.question)
+        best_points = await rerank_points(client, ctx, rerank_query, best_points, boost_map)
+        if collect_stages:
+            stages["reranked"] = assemble_message_ids(ctx, best_points, limit=FINAL_MESSAGE_LIMIT)
+
+    final_message_ids = assemble_message_ids(ctx, best_points, limit=FINAL_MESSAGE_LIMIT)
+    return final_message_ids, stages
+
+
+@app.post("/search", response_model=SearchAPIResponse)
+async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
+    final_message_ids, _ = await run_search_pipeline(payload)
     if not final_message_ids:
         return SearchAPIResponse(results=[])
 
     return SearchAPIResponse(
         results=[SearchAPIItem(message_ids=final_message_ids)]
     )
+
+
+@app.post("/_debug/search")
+async def search_debug(
+    payload: SearchAPIRequest,
+    no_rescore: bool = False,
+    no_rerank: bool = False,
+    fusion: str = "dbsf",
+    max_dense: int | None = None,
+    max_sparse: int | None = None,
+) -> dict[str, Any]:
+    final_message_ids, stages = await run_search_pipeline(
+        payload,
+        skip_rescore=no_rescore,
+        skip_rerank=no_rerank,
+        collect_stages=True,
+        fusion=fusion,
+        max_dense=max_dense,
+        max_sparse=max_sparse,
+    )
+    if not final_message_ids:
+        return {"final": [], "stages": stages}
+
+    return {"final": final_message_ids, "stages": stages}
 
 
 @app.exception_handler(Exception)

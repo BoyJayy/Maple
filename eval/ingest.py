@@ -277,8 +277,8 @@ def main() -> None:
                 },
             )
         )
-    qc.upsert(collection_name=COLLECTION, points=points)
-    print(f"done. {len(points)} points (skipped {skipped} empty chunks)")
+    result = qc.upsert(collection_name=COLLECTION, points=points, wait=True)
+    print(f"done. {len(points)} points (skipped {skipped} empty chunks) status={result.status}")
 
 
 if __name__ == "__main__":
