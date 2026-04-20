@@ -36,25 +36,26 @@ jobs:
         id: build
         env:
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_PATH: ${{ github.event_path }}
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
           ACTOR: ${{ github.actor }}
           SHA: ${{ github.sha }}
           REF_NAME: ${{ github.ref_name }}
+          GITHUB_OUTPUT: ${{ github.output }}
         run: |
           python3 << 'PY'
           import json
           import os
           import html
 
-          event_name = os.environ["EVENT_NAME"]
-          event_path = os.environ["EVENT_PATH"]
-          repository = os.environ["REPOSITORY"]
-          repository_url = os.environ["REPOSITORY_URL"]
-          actor = os.environ["ACTOR"]
-          sha = os.environ["SHA"]
+          event_name = os.environ.get("EVENT_NAME", "")
+          event_path = os.environ["GITHUB_EVENT_PATH"]
+          repository = os.environ.get("REPOSITORY", "")
+          repository_url = os.environ.get("REPOSITORY_URL", "")
+          actor = os.environ.get("ACTOR", "")
+          sha = os.environ.get("SHA", "")
           ref_name = os.environ.get("REF_NAME", "")
+          github_output = os.environ["GITHUB_OUTPUT"]
 
           with open(event_path, "r", encoding="utf-8") as f:
               event = json.load(f)
@@ -71,46 +72,46 @@ jobs:
                   return s
               return s[:n - 1] + "…"
 
-          def lines_join(items):
+          def join_lines(items):
               return "\n".join(i for i in items if i)
 
           msg = ""
-          event_type = event_name
 
           if event_name == "push":
               commits = event.get("commits", [])
-              compare = event.get("compare", repository_url)
-              branch = event.get("ref", "").replace("refs/heads/", "").replace("refs/tags/", "")
+              compare = event.get("compare") or repository_url
+              ref = event.get("ref", "")
+              branch = ref.replace("refs/heads/", "").replace("refs/tags/", "")
               created = event.get("created", False)
               deleted = event.get("deleted", False)
               forced = event.get("forced", False)
 
               title = "📤 <b>PUSH</b>"
               if created:
-                  title = "🌱 <b>BRANCH/TAG CREATED BY PUSH</b>"
+                  title = "🌱 <b>REF CREATED</b>"
               if deleted:
-                  title = "🗑 <b>REF DELETED BY PUSH</b>"
+                  title = "🗑 <b>REF DELETED</b>"
 
               commit_lines = []
               for c in commits[:10]:
+                  commit_id = short_sha(c.get("id", ""))
                   message = trim((c.get("message") or "").split("\n")[0], 120)
                   author = c.get("author", {}).get("name", "unknown")
                   url = c.get("url", "")
-                  commit_lines.append(
-                      f"• <code>{esc(c.get('id', '')[:7])}</code> "
-                      f"{esc(message)} — <i>{esc(author)}</i>\n"
-                      f"  <a href=\"{esc(url)}\">open commit</a>"
-                  )
+                  line = f"• <code>{esc(commit_id)}</code> {esc(message)} — <i>{esc(author)}</i>"
+                  if url:
+                      line += f"\n  <a href=\"{esc(url)}\">open commit</a>"
+                  commit_lines.append(line)
 
               extra = ""
               if len(commits) > 10:
-                  extra = f"\n…and {len(commits) - 10} more commit(s)"
+                  extra = f"…and {len(commits) - 10} more commit(s)"
 
               flags = []
               if forced:
                   flags.append("forced push")
 
-              msg = lines_join([
+              msg = join_lines([
                   title,
                   f"📦 <b>{esc(repository)}</b>",
                   f"🌿 <code>{esc(branch or ref_name)}</code>",
@@ -119,7 +120,7 @@ jobs:
                   f"⚠️ {' | '.join(flags)}" if flags else "",
                   "",
                   "<b>Changes:</b>",
-                  "\n".join(commit_lines) if commit_lines else "No commit list in payload",
+                  "\n".join(commit_lines) if commit_lines else f"Last commit: <code>{esc(short_sha(sha))}</code>",
                   extra,
                   "",
                   f"🔗 <a href=\"{esc(compare)}\">compare view</a>"
@@ -140,7 +141,7 @@ jobs:
               commits_count = pr.get("commits", 0)
               base = pr.get("base", {}).get("ref", "")
               head = pr.get("head", {}).get("ref", "")
-              body = trim(pr.get("body", ""), 400)
+              body = trim(pr.get("body", ""), 500)
 
               icon = "🔀"
               label = f"PR {action.upper()}"
@@ -159,16 +160,15 @@ jobs:
                   details.append(f"state: {state}")
               if draft:
                   details.append("draft")
-              details_text = " | ".join(details)
 
-              msg = lines_join([
+              msg = join_lines([
                   f"{icon} <b>{esc(label)}</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"#{number} <a href=\"{esc(url)}\"><b>{esc(title)}</b></a>",
                   f"👤 <b>{esc(actor)}</b>",
                   f"🌿 <code>{esc(head)}</code> → <code>{esc(base)}</code>",
                   f"📊 +{additions} / -{deletions} | files: {changed_files} | commits: {commits_count}",
-                  f"ℹ️ {esc(details_text)}" if details_text else "",
+                  f"ℹ️ {esc(' | '.join(details))}" if details else "",
                   "",
                   esc(body) if body else ""
               ])
@@ -180,9 +180,9 @@ jobs:
               title = issue.get("title", "")
               url = issue.get("html_url", repository_url)
               state = issue.get("state", "")
-              body = trim(issue.get("body", ""), 400)
+              body = trim(issue.get("body", ""), 500)
 
-              msg = lines_join([
+              msg = join_lines([
                   f"📝 <b>ISSUE {esc(action.upper())}</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"#{number} <a href=\"{esc(url)}\"><b>{esc(title)}</b></a>",
@@ -198,13 +198,13 @@ jobs:
               is_pr = "pull_request" in issue
               kind = "PR COMMENT" if is_pr else "ISSUE COMMENT"
 
-              msg = lines_join([
+              msg = join_lines([
                   f"💬 <b>{kind}</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"🔢 #{issue.get('number', '')}: <a href=\"{esc(comment.get('html_url', repository_url))}\"><b>{esc(issue.get('title', ''))}</b></a>",
                   f"👤 <b>{esc(actor)}</b>",
                   "",
-                  esc(trim(comment.get("body", ""), 500))
+                  esc(trim(comment.get("body", ""), 700))
               ])
 
           elif event_name == "pull_request_review":
@@ -212,29 +212,33 @@ jobs:
               pr = event.get("pull_request", {})
               state = (review.get("state") or "").upper()
 
-              msg = lines_join([
+              msg = join_lines([
                   f"🧾 <b>PR REVIEW {esc(state)}</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"🔢 <a href=\"{esc(pr.get('html_url', repository_url))}\">#{pr.get('number', '')} {esc(pr.get('title', ''))}</a>",
                   f"👤 <b>{esc(actor)}</b>",
                   "",
-                  esc(trim(review.get("body", ""), 500)) if review.get("body") else ""
+                  esc(trim(review.get("body", ""), 700)) if review.get("body") else ""
               ])
 
           elif event_name == "pull_request_review_comment":
               pr = event.get("pull_request", {})
               comment = event.get("comment", {})
               path = comment.get("path", "")
-              line = comment.get("line", "") or comment.get("original_line", "")
+              line_no = comment.get("line") or comment.get("original_line") or ""
 
-              msg = lines_join([
+              file_line = f"📄 <code>{esc(path)}</code>"
+              if line_no:
+                  file_line += f":{line_no}"
+
+              msg = join_lines([
                   f"🗨 <b>PR REVIEW COMMENT</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"🔢 <a href=\"{esc(comment.get('html_url', repository_url))}\">#{pr.get('number', '')} {esc(pr.get('title', ''))}</a>",
                   f"👤 <b>{esc(actor)}</b>",
-                  f"📄 <code>{esc(path)}</code>" + (f":{line}" if line else ""),
+                  file_line,
                   "",
-                  esc(trim(comment.get("body", ""), 500))
+                  esc(trim(comment.get("body", ""), 700))
               ])
 
           elif event_name == "release":
@@ -243,9 +247,9 @@ jobs:
               name = release.get("name") or release.get("tag_name", "")
               url = release.get("html_url", repository_url)
               prerelease = release.get("prerelease", False)
-              body = trim(release.get("body", ""), 700)
+              body = trim(release.get("body", ""), 1000)
 
-              msg = lines_join([
+              msg = join_lines([
                   f"🚀 <b>RELEASE {esc(action.upper())}</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"🏷 <a href=\"{esc(url)}\"><b>{esc(name)}</b></a>",
@@ -260,7 +264,7 @@ jobs:
               ref = event.get("ref", "")
               master_branch = event.get("master_branch", "")
 
-              msg = lines_join([
+              msg = join_lines([
                   f"✨ <b>{esc(ref_type.upper())} CREATED</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"🔤 <code>{esc(ref)}</code>",
@@ -272,7 +276,7 @@ jobs:
               ref_type = event.get("ref_type", "")
               ref = event.get("ref", "")
 
-              msg = lines_join([
+              msg = join_lines([
                   f"🗑 <b>{esc(ref_type.upper())} DELETED</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"🔤 <code>{esc(ref)}</code>",
@@ -284,16 +288,16 @@ jobs:
               full_name = forkee.get("full_name", "")
               url = forkee.get("html_url", repository_url)
 
-              msg = lines_join([
+              msg = join_lines([
                   f"🍴 <b>REPOSITORY FORKED</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"👤 <b>{esc(actor)}</b>",
-                  f"🔗 <a href=\"{esc(url)}\">{esc(full_name)}</a>"
+                  f"🔗 <a href=\"{esc(url)}\">{esc(full_name)}</a>" if url else ""
               ])
 
           elif event_name == "watch":
               action = event.get("action", "")
-              msg = lines_join([
+              msg = join_lines([
                   f"⭐ <b>WATCH {esc(action.upper())}</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"👤 <b>{esc(actor)}</b>",
@@ -301,7 +305,7 @@ jobs:
               ])
 
           elif event_name == "workflow_dispatch":
-              msg = lines_join([
+              msg = join_lines([
                   f"🛠 <b>MANUAL RUN</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"👤 <b>{esc(actor)}</b>",
@@ -310,17 +314,16 @@ jobs:
               ])
 
           else:
-              msg = lines_join([
+              msg = join_lines([
                   f"📣 <b>EVENT: {esc(event_name)}</b>",
                   f"📦 <b>{esc(repository)}</b>",
                   f"👤 <b>{esc(actor)}</b>",
                   f"🔗 <a href=\"{esc(repository_url)}\">open repo</a>"
               ])
 
-          # Telegram hard limit is 4096 chars per message
           msg = msg[:4000]
 
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+          with open(github_output, "a", encoding="utf-8") as out:
               out.write("text<<EOF\n")
               out.write(msg + "\n")
               out.write("EOF\n")
