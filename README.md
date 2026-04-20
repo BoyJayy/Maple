@@ -1,4 +1,4 @@
-# Search Hackathon Solution
+# Advanced hackathon solution from Samsung IC and VK tech
 
 Проект состоит из двух сервисов:
 - `index` — принимает чат, нормализует сообщения и возвращает чанки для индексации;
