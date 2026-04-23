@@ -188,7 +188,7 @@ Chunking sweep:
 python3 scripts/sweep_chunking.py --help
 ```
 
-Qdrant retrieval checks:
+Qdrant retrieval A/B checks:
 
 ```bash
 python3 scripts/ab_qdrant.py --help

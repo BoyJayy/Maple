@@ -1,4 +1,4 @@
-# Index service
+# Index Service
 
 The `index` service converts raw chat payloads into searchable chunks. It does not write data to Qdrant directly. Instead, it returns chunk texts and `message_ids`, and exposes a local sparse embedding endpoint.
 

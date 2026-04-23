@@ -1,8 +1,8 @@
-# Search service
+# Search Service
 
 The `search` service accepts a question, runs hybrid retrieval against Qdrant and returns ranked `message_ids`.
 
-The current implementation is local first:
+The current implementation is local-first:
 - dense embeddings are computed locally with `fastembed`;
 - sparse embeddings are computed locally with `fastembed`;
 - there is no external reranker.
@@ -132,7 +132,7 @@ Useful query parameters:
 - `max_sparse=2`
 - `no_rescore=true`
 
-This endpoint is intended for local analysis and A B testing.
+This endpoint is intended for local analysis and A/B testing.
 
 ## Default models
 

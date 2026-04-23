@@ -6,7 +6,7 @@ The repository contains two services:
 - `index` prepares searchable chunks from raw chat payloads.
 - `search` runs hybrid retrieval over Qdrant and returns ranked `message_ids`.
 
-The current version is local first:
+The current version is local-first:
 - no external embedding API;
 - no external reranker;
 - all models run inside the project with `fastembed`;
@@ -14,8 +14,8 @@ The current version is local first:
 
 ## Project layout
 
-- `index/` — indexing service
-- `search/` — search service
+- `index/` — Index Service
+- `search/` — Search Service
 - `eval/` — local ingestion and offline evaluation
 - `scripts/` — helper utilities
 - `data/` — sample datasets and payloads
@@ -26,8 +26,8 @@ The current version is local first:
 
 - [docs/architecture.md](docs/architecture.md) — system overview
 - [docs/api.md](docs/api.md) — API contracts
-- [docs/index_service.md](docs/index_service.md) — indexing service
-- [docs/search_service.md](docs/search_service.md) — search service
+- [docs/index_service.md](docs/index_service.md) — Index Service
+- [docs/search_service.md](docs/search_service.md) — Search Service
 - [docs/local_development.md](docs/local_development.md) — local run, evaluation and troubleshooting
 
 ## Requirements
@@ -165,7 +165,7 @@ python3 scripts/chunking_diagnostic.py
 python3 scripts/chunking_diagnostic.py data/Dataset_main.json
 ```
 
-Retrieval A B checks:
+Retrieval A/B checks:
 
 ```bash
 python3 scripts/ab_qdrant.py --help

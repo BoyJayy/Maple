@@ -11,7 +11,7 @@ Default local URLs:
 - `http://localhost:8001` — index
 - `http://localhost:8002` — search
 
-## Index service
+## Index Service
 
 ### GET /health
 
@@ -127,7 +127,7 @@ Response body:
 }
 ```
 
-## Search service
+## Search Service
 
 ### GET /health
 
