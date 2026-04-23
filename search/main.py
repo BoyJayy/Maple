@@ -1,28 +1,25 @@
 from contextlib import asynccontextmanager
 from typing import Any
 
-import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from qdrant_client import AsyncQdrantClient
 
-from config import API_KEY, HOST, PORT, QDRANT_URL, logger
+from config import HOST, PORT, QDRANT_API_KEY, QDRANT_URL, logger
 from pipeline import run_search_pipeline
 from schemas import SearchAPIItem, SearchAPIRequest, SearchAPIResponse
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.http = httpx.AsyncClient()
     app.state.qdrant = AsyncQdrantClient(
         url=QDRANT_URL,
-        api_key=API_KEY,
+        api_key=QDRANT_API_KEY,
     )
     try:
         yield
     finally:
-        await app.state.http.aclose()
         await app.state.qdrant.close()
 
 
@@ -38,7 +35,6 @@ async def health() -> dict[str, str]:
 async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
     try:
         final_message_ids, _ = await run_search_pipeline(
-            app.state.http,
             app.state.qdrant,
             payload,
         )
@@ -63,11 +59,9 @@ async def search_debug(
 ) -> dict[str, Any]:
     try:
         final_message_ids, stages = await run_search_pipeline(
-            app.state.http,
             app.state.qdrant,
             payload,
             skip_rescore=no_rescore,
-            skip_rerank=no_rerank,
             collect_stages=True,
             fusion=fusion,
             max_dense=max_dense,

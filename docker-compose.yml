@@ -8,6 +8,9 @@ services:
     image: curlimages/curl:8.12.1
     depends_on:
       - qdrant
+    environment:
+      QDRANT_COLLECTION_NAME: ${QDRANT_COLLECTION_NAME:-messages}
+      DENSE_VECTOR_SIZE: ${DENSE_VECTOR_SIZE:-384}
     command:
       - sh
       - -c
@@ -15,15 +18,15 @@ services:
         until curl -sf http://qdrant:6333/collections; do
           sleep 1
         done
-        if curl -sf http://qdrant:6333/collections/evaluation >/dev/null; then
+        if curl -sf "http://qdrant:6333/collections/$QDRANT_COLLECTION_NAME" >/dev/null; then
           exit 0
         fi
-        curl -sf -X PUT http://qdrant:6333/collections/evaluation \
+        curl -sf -X PUT "http://qdrant:6333/collections/$QDRANT_COLLECTION_NAME" \
           -H 'Content-Type: application/json' \
           -d '{
             "vectors": {
               "dense": {
-                "size": 1024,
+                "size": '"$DENSE_VECTOR_SIZE"',
                 "distance": "Cosine"
               }
             },
@@ -41,12 +44,15 @@ services:
     depends_on:
       - qdrant
     environment:
-      MAX_CHUNK_CHARS: ${MAX_CHUNK_CHARS:-1800}
+      MAX_CHUNK_CHARS: ${MAX_CHUNK_CHARS:-1600}
       OVERLAP_MESSAGE_COUNT: ${OVERLAP_MESSAGE_COUNT:-2}
-      OVERLAP_CONTEXT_CHARS: ${OVERLAP_CONTEXT_CHARS:-500}
       MAX_TIME_GAP_SECONDS: ${MAX_TIME_GAP_SECONDS:-10800}
+      LONG_MESSAGE_CHAR_THRESHOLD: ${LONG_MESSAGE_CHAR_THRESHOLD:-1400}
+      LONG_MESSAGE_LINE_THRESHOLD: ${LONG_MESSAGE_LINE_THRESHOLD:-30}
+      TECHNICAL_PREVIEW_LINES: ${TECHNICAL_PREVIEW_LINES:-18}
+      TECHNICAL_PREVIEW_CHARS: ${TECHNICAL_PREVIEW_CHARS:-1800}
       SPLIT_MESSAGE_CHAR_THRESHOLD: ${SPLIT_MESSAGE_CHAR_THRESHOLD:-1200}
-      SPLIT_SEGMENT_TARGET_CHARS: ${SPLIT_SEGMENT_TARGET_CHARS:-700}
+      SPLIT_SEGMENT_TARGET_CHARS: ${SPLIT_SEGMENT_TARGET_CHARS:-650}
     ports:
       - "8001:8000"
 
@@ -58,23 +64,17 @@ services:
         condition: service_completed_successfully
     environment:
       QDRANT_URL: http://qdrant:6333
-      QDRANT_COLLECTION_NAME: evaluation
+      QDRANT_COLLECTION_NAME: ${QDRANT_COLLECTION_NAME:-messages}
       QDRANT_DENSE_VECTOR_NAME: dense
       QDRANT_SPARSE_VECTOR_NAME: sparse
-      EMBEDDINGS_DENSE_URL: ${EMBEDDINGS_DENSE_URL:-http://83.166.249.64:18001/embeddings}
-      RERANKER_URL: ${RERANKER_URL:-http://83.166.249.64:18001/score}
-      OPEN_API_LOGIN: ${OPEN_API_LOGIN:?set OPEN_API_LOGIN before docker compose up}
-      OPEN_API_PASSWORD: ${OPEN_API_PASSWORD:?set OPEN_API_PASSWORD before docker compose up}
-      RERANK_ALPHA: ${RERANK_ALPHA:-0.3}
-      MAX_DENSE_QUERIES: ${MAX_DENSE_QUERIES:-8}
-      MAX_SPARSE_QUERIES: ${MAX_SPARSE_QUERIES:-8}
-      DENSE_PREFETCH_K: ${DENSE_PREFETCH_K:-70}
-      SPARSE_PREFETCH_K: ${SPARSE_PREFETCH_K:-45}
-      RETRIEVE_K: ${RETRIEVE_K:-150}
-      RERANK_LIMIT: ${RERANK_LIMIT:-20}
-      UPSTREAM_CACHE_MAX_ITEMS: ${UPSTREAM_CACHE_MAX_ITEMS:-20000}
-      UPSTREAM_MAX_RETRIES: ${UPSTREAM_MAX_RETRIES:-1}
-      UPSTREAM_RETRY_DELAY_SECONDS: ${UPSTREAM_RETRY_DELAY_SECONDS:-0.25}
-      INTENT_ALIGNMENT_WEIGHT: ${INTENT_ALIGNMENT_WEIGHT:-0.0}
+      DENSE_MODEL_NAME: ${DENSE_MODEL_NAME:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+      DENSE_VECTOR_SIZE: ${DENSE_VECTOR_SIZE:-384}
+      SPARSE_MODEL_NAME: ${SPARSE_MODEL_NAME:-Qdrant/bm25}
+      FUSION_MODE: ${FUSION_MODE:-dbsf}
+      MAX_DENSE_QUERIES: ${MAX_DENSE_QUERIES:-3}
+      MAX_SPARSE_QUERIES: ${MAX_SPARSE_QUERIES:-3}
+      DENSE_PREFETCH_K: ${DENSE_PREFETCH_K:-40}
+      SPARSE_PREFETCH_K: ${SPARSE_PREFETCH_K:-40}
+      RETRIEVE_K: ${RETRIEVE_K:-60}
     ports:
       - "8002:8000"

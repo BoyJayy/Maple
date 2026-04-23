@@ -1,48 +1,36 @@
-"""Populate Qdrant from a local corpus into Qdrant.
-
-Usage:
-    python eval/ingest.py
-
-Env required:
-    OPEN_API_LOGIN, OPEN_API_PASSWORD  -- creds for dense API (Basic Auth)
-
-Optional env:
-    INDEX_URL                    (default http://localhost:8001)
-    QDRANT_URL                   (default http://localhost:6333)
-    QDRANT_COLLECTION_NAME       (default evaluation)
-    EMBEDDINGS_DENSE_URL         (default http://83.166.249.64:18001/embeddings)
-    EMBEDDINGS_DENSE_MODEL       (default Qwen/Qwen3-Embedding-0.6B)
-    DATA_PATH                    (default data/Dataset_main.json)
-    BATCH_SIZE                   (default 16)
-    DELETE_EXISTING_CHAT_POINTS  (default 1)
-    RESET_COLLECTION             (default 0; useful for synthetic JSONL corpora)
-"""
 from __future__ import annotations
 
 import hashlib
 import json
 import os
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import httpx
+from fastembed import TextEmbedding
 from qdrant_client import QdrantClient, models
 
 INDEX_URL = os.getenv("INDEX_URL", "http://localhost:8001")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
-COLLECTION = os.getenv("QDRANT_COLLECTION_NAME", "evaluation")
-DENSE_URL = os.getenv("EMBEDDINGS_DENSE_URL", "http://83.166.249.64:18001/embeddings")
-DENSE_MODEL = os.getenv("EMBEDDINGS_DENSE_MODEL", "Qwen/Qwen3-Embedding-0.6B")
-DENSE_SIZE = int(os.getenv("EMBEDDINGS_DENSE_SIZE", "1024"))
-LOGIN = os.environ["OPEN_API_LOGIN"]
-PASSWORD = os.environ["OPEN_API_PASSWORD"]
+COLLECTION = os.getenv("QDRANT_COLLECTION_NAME", "messages")
+DENSE_MODEL_NAME = os.getenv(
+    "DENSE_MODEL_NAME",
+    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+)
+DENSE_SIZE = int(os.getenv("DENSE_VECTOR_SIZE", "384"))
 DATA_PATH = Path(os.getenv("DATA_PATH", "data/Dataset_main.json"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
 DELETE_EXISTING_CHAT_POINTS = os.getenv("DELETE_EXISTING_CHAT_POINTS", "1") == "1"
 RESET_COLLECTION = os.getenv("RESET_COLLECTION", "0") == "1"
 
 _CHUNK_ID_NAMESPACE = uuid.UUID("6f8c3a1e-0000-0000-0000-000000000001")
+
+
+@lru_cache(maxsize=1)
+def get_dense_model() -> TextEmbedding:
+    return TextEmbedding(model_name=DENSE_MODEL_NAME)
 
 
 def stable_chunk_id(chat_id: str, chunk: dict) -> str:
@@ -63,7 +51,6 @@ def ensure_collection(qc: QdrantClient, name: str, dense_size: int) -> None:
             "sparse": models.SparseVectorParams(modifier=models.Modifier.IDF),
         },
     )
-    print(f"      created collection {name} (dense={dense_size}, sparse=bm25+IDF)")
 
 
 def recreate_collection(qc: QdrantClient, name: str, dense_size: int) -> None:
@@ -89,47 +76,40 @@ def delete_existing_chat_points(qc: QdrantClient, collection_name: str, chat_id:
     )
 
 
-def embed_dense_batch(client: httpx.Client, texts: list[str]) -> list[list[float]]:
-    r = client.post(
-        DENSE_URL,
-        json={"model": DENSE_MODEL, "input": texts},
-        auth=(LOGIN, PASSWORD),
-        timeout=120.0,
-    )
-    r.raise_for_status()
-    data = r.json()["data"]
-    return [item["embedding"] for item in sorted(data, key=lambda x: x["index"])]
+def embed_dense_batch(texts: list[str]) -> list[list[float]]:
+    return [vector.tolist() for vector in get_dense_model().embed(texts)]
 
 
 def build_metadata(chat: dict, chunk: dict, messages_by_id: dict) -> dict:
     msg_ids = chunk["message_ids"]
-    msgs = [messages_by_id[mid] for mid in msg_ids if mid in messages_by_id]
-    if not msgs:
+    messages = [messages_by_id[message_id] for message_id in msg_ids if message_id in messages_by_id]
+    if not messages:
         raise ValueError(f"chunk has no resolvable messages: {msg_ids[:3]}")
-    times = [m["time"] for m in msgs]
-    participants = sorted({m["sender_id"] for m in msgs})
-    mentions = sorted({m for msg in msgs for m in (msg.get("mentions") or [])})
+
+    times = [message["time"] for message in messages]
+    participants = sorted({message["sender_id"] for message in messages})
+    mentions = sorted({mention for message in messages for mention in (message.get("mentions") or [])})
     return {
         "chat_name": chat["name"],
         "chat_type": chat["type"],
         "chat_id": chat["id"],
         "chat_sn": chat["sn"],
-        "thread_sn": next((m.get("thread_sn") for m in msgs if m.get("thread_sn")), None),
+        "thread_sn": next((message.get("thread_sn") for message in messages if message.get("thread_sn")), None),
         "message_ids": msg_ids,
         "start": str(min(times)),
         "end": str(max(times)),
         "participants": participants,
         "mentions": mentions,
-        "contains_forward": any(m.get("is_forward") for m in msgs),
-        "contains_quote": any(m.get("is_quote") for m in msgs),
+        "contains_forward": any(message.get("is_forward") for message in messages),
+        "contains_quote": any(message.get("is_quote") for message in messages),
     }
 
 
-def load_index_payload(data_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+def load_index_payload(data_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, dict[str, Any]]]:
     data = json.loads(data_path.read_text())
     chat = data["chat"]
     messages = data["messages"]
-    messages_by_id = {m["id"]: m for m in messages}
+    messages_by_id = {message["id"]: message for message in messages}
     return chat, messages, messages_by_id
 
 
@@ -149,8 +129,8 @@ def load_synthetic_eval_chunks(data_path: Path) -> tuple[dict[str, Any], list[di
     seen_ids: set[str] = set()
     base_time = 1_700_000_000
 
-    with data_path.open() as fh:
-        for index, line in enumerate(fh):
+    with data_path.open() as handle:
+        for line in handle:
             line = line.strip()
             if not line:
                 continue
@@ -200,8 +180,8 @@ def load_synthetic_eval_chunks(data_path: Path) -> tuple[dict[str, Any], list[di
 def is_synthetic_eval_jsonl(data_path: Path) -> bool:
     if data_path.suffix.lower() != ".jsonl":
         return False
-    with data_path.open() as fh:
-        first_line = fh.readline().strip()
+    with data_path.open() as handle:
+        first_line = handle.readline().strip()
     if not first_line:
         return False
     try:
@@ -212,7 +192,7 @@ def is_synthetic_eval_jsonl(data_path: Path) -> bool:
 
 
 def main() -> None:
-    http = httpx.Client()
+    http = httpx.Client(timeout=300.0)
 
     synthetic_mode = is_synthetic_eval_jsonl(DATA_PATH)
     if synthetic_mode:
@@ -221,55 +201,52 @@ def main() -> None:
         print(f"      -> {len(chunks)} synthetic chunks")
     else:
         chat, messages, messages_by_id = load_index_payload(DATA_PATH)
-        print(f"[1/4] POST /index  ({len(messages)} msgs)")
-        r = http.post(
+        print(f"[1/4] POST /index ({len(messages)} messages)")
+        response = http.post(
             f"{INDEX_URL}/index",
             json={"data": {"chat": chat, "overlap_messages": [], "new_messages": messages}},
-            timeout=300.0,
         )
-        r.raise_for_status()
-        chunks = r.json()["results"]
+        response.raise_for_status()
+        chunks = response.json()["results"]
         print(f"      -> {len(chunks)} chunks")
 
-    print("[2/4] POST /sparse_embedding  (batch)")
-    r = http.post(
+    print("[2/4] POST /sparse_embedding")
+    response = http.post(
         f"{INDEX_URL}/sparse_embedding",
-        json={"texts": [c["sparse_content"] for c in chunks]},
-        timeout=300.0,
+        json={"texts": [chunk["sparse_content"] for chunk in chunks]},
     )
-    r.raise_for_status()
-    sparse_vectors = r.json()["vectors"]
-    assert len(sparse_vectors) == len(chunks)
+    response.raise_for_status()
+    sparse_vectors = response.json()["vectors"]
 
-    print(f"[3/4] dense embed  ({len(chunks)} in batches of {BATCH_SIZE})")
+    print(f"[3/4] dense embed locally ({len(chunks)} in batches of {BATCH_SIZE})")
     dense_vectors: list[list[float]] = []
-    for i in range(0, len(chunks), BATCH_SIZE):
-        batch = [c["dense_content"] for c in chunks[i : i + BATCH_SIZE]]
-        dense_vectors.extend(embed_dense_batch(http, batch))
-        print(f"      batch {i // BATCH_SIZE + 1} done")
+    for index in range(0, len(chunks), BATCH_SIZE):
+        batch = [chunk["dense_content"] for chunk in chunks[index : index + BATCH_SIZE]]
+        dense_vectors.extend(embed_dense_batch(batch))
+        print(f"      batch {index // BATCH_SIZE + 1} done")
 
-    print(f"[4/4] Qdrant upsert  -> {COLLECTION}")
-    qc = QdrantClient(url=QDRANT_URL)
+    print(f"[4/4] Qdrant upsert -> {COLLECTION}")
+    qdrant = QdrantClient(url=QDRANT_URL)
     if RESET_COLLECTION:
-        print(f"      recreating collection {COLLECTION}")
-        recreate_collection(qc, COLLECTION, DENSE_SIZE)
+        recreate_collection(qdrant, COLLECTION, DENSE_SIZE)
     else:
-        ensure_collection(qc, COLLECTION, DENSE_SIZE)
+        ensure_collection(qdrant, COLLECTION, DENSE_SIZE)
     if DELETE_EXISTING_CHAT_POINTS and not RESET_COLLECTION:
-        print(f"      deleting existing points for chat {chat['id']}")
-        delete_existing_chat_points(qc, COLLECTION, chat["id"])
-    points = []
-    skipped = 0
-    for chunk, dense, sparse in zip(chunks, dense_vectors, sparse_vectors, strict=True):
+        delete_existing_chat_points(qdrant, COLLECTION, chat["id"])
+
+    points: list[models.PointStruct] = []
+    for chunk, dense_vector, sparse_vector in zip(chunks, dense_vectors, sparse_vectors, strict=True):
         if not chunk["message_ids"]:
-            skipped += 1
             continue
         points.append(
             models.PointStruct(
                 id=stable_chunk_id(chat["id"], chunk),
                 vector={
-                    "dense": dense,
-                    "sparse": models.SparseVector(indices=sparse["indices"], values=sparse["values"]),
+                    "dense": dense_vector,
+                    "sparse": models.SparseVector(
+                        indices=sparse_vector["indices"],
+                        values=sparse_vector["values"],
+                    ),
                 },
                 payload={
                     "page_content": chunk["page_content"],
@@ -277,8 +254,9 @@ def main() -> None:
                 },
             )
         )
-    result = qc.upsert(collection_name=COLLECTION, points=points, wait=True)
-    print(f"done. {len(points)} points (skipped {skipped} empty chunks) status={result.status}")
+
+    result = qdrant.upsert(collection_name=COLLECTION, points=points, wait=True)
+    print(f"done. {len(points)} points status={result.status}")
 
 
 if __name__ == "__main__":

@@ -39,34 +39,6 @@ class SearchAPIResponse(BaseModel):
     results: list[SearchAPIItem]
 
 
-class DenseEmbeddingItem(BaseModel):
-    index: int
-    embedding: list[float]
-
-
-class DenseEmbeddingResponse(BaseModel):
-    data: list[DenseEmbeddingItem]
-
-
 class SparseVector(BaseModel):
     indices: list[int] = Field(default_factory=list)
     values: list[float] = Field(default_factory=list)
-
-
-class SparseEmbeddingResponse(BaseModel):
-    vectors: list[SparseVector]
-
-
-class ChunkMetadata(BaseModel):
-    chat_name: str
-    chat_type: str
-    chat_id: str
-    chat_sn: str
-    thread_sn: str | None = None
-    message_ids: list[str]
-    start: str
-    end: str
-    participants: list[str] = Field(default_factory=list)
-    mentions: list[str] = Field(default_factory=list)
-    contains_forward: bool = False
-    contains_quote: bool = False
