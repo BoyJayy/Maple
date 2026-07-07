@@ -1,8 +1,10 @@
-"""Run eval dataset through search service, compute Recall@K and nDCG@K.
+"""Run eval dataset through search service, compute Recall@K, nDCG@K and MRR@K.
 
 Usage:
     python eval/run.py --dataset eval/dataset.jsonl
     python eval/run.py --dataset eval/dataset.jsonl --stages
+    python eval/run.py --dataset eval/dataset.jsonl --save-baseline eval/baseline.json
+    python eval/run.py --dataset eval/dataset.jsonl --baseline eval/baseline.json
 
 With --stages, hits /_debug/search to report metrics at each pipeline phase:
     retrieval -> rescored -> reranked -> final
@@ -16,7 +18,7 @@ import statistics
 from pathlib import Path
 
 import httpx
-from metrics import ndcg_at_k, recall_at_k, score
+from metrics import mrr_at_k, ndcg_at_k, recall_at_k, score
 
 SEARCH_URL = os.getenv("SEARCH_URL", "http://localhost:8002")
 
@@ -32,11 +34,24 @@ def load_dataset(path: Path) -> list[dict]:
     return [json.loads(line) for line in raw.splitlines() if line.strip()]
 
 
-def run(dataset_path: Path, k: int, verbose: bool, stages: bool) -> None:
+def load_baseline(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    return json.loads(path.read_text())
+
+
+def run(
+    dataset_path: Path,
+    k: int,
+    verbose: bool,
+    stages: bool,
+    baseline_path: Path | None,
+    save_baseline_path: Path | None,
+) -> None:
     entries = load_dataset(dataset_path)
     http = httpx.Client(timeout=120.0)
 
-    stage_scores: dict[str, list[tuple[float, float]]] = {}
+    stage_scores: dict[str, list[tuple[float, float, float]]] = {}
     misses: list[dict] = []
     endpoint = "/_debug/search" if stages else "/search"
 
@@ -65,14 +80,15 @@ def run(dataset_path: Path, k: int, verbose: bool, stages: bool) -> None:
         for stage_name, predicted in stage_predictions.items():
             r_k = recall_at_k(predicted, gt, k)
             n_k = ndcg_at_k(predicted, gt, k)
-            stage_scores.setdefault(stage_name, []).append((r_k, n_k))
+            m_k = mrr_at_k(predicted, gt, k)
+            stage_scores.setdefault(stage_name, []).append((r_k, n_k, m_k))
 
             if stage_name == "final" and r_k < 1.0:
                 missed = gt - set(predicted[:k])
                 misses.append({"id": qid, "recall": r_k, "missed": sorted(missed)})
 
             if verbose and stage_name == "final":
-                print(f"  {qid}  R@{k}={r_k:.3f}  nDCG@{k}={n_k:.3f}  '{question['text'][:60]}'")
+                print(f"  {qid}  R@{k}={r_k:.3f}  nDCG@{k}={n_k:.3f}  MRR@{k}={m_k:.3f}  '{question['text'][:60]}'")
 
     print()
     print(f"N = {len(entries)}")
@@ -80,16 +96,41 @@ def run(dataset_path: Path, k: int, verbose: bool, stages: bool) -> None:
     ordered = [name for name in stage_order if name in stage_scores]
     ordered += [name for name in stage_scores if name not in stage_order]
 
-    header = f"{'stage':<12} {'Recall@'+str(k):<12} {'nDCG@'+str(k):<12} {'score':<10}"
+    baseline = load_baseline(baseline_path) if baseline_path else {}
+    summary: dict[str, dict[str, float]] = {}
+
+    header = f"{'stage':<12} {'Recall@'+str(k):<12} {'nDCG@'+str(k):<12} {'MRR@'+str(k):<12} {'score':<10}"
     print(header)
     print("-" * len(header))
     for stage_name in ordered:
-        recalls = [r for r, _ in stage_scores[stage_name]]
-        ndcgs = [n for _, n in stage_scores[stage_name]]
+        recalls = [r for r, _, _ in stage_scores[stage_name]]
+        ndcgs = [n for _, n, _ in stage_scores[stage_name]]
+        mrrs = [m for _, _, m in stage_scores[stage_name]]
         recall_avg = statistics.mean(recalls) if recalls else 0.0
         ndcg_avg = statistics.mean(ndcgs) if ndcgs else 0.0
+        mrr_avg = statistics.mean(mrrs) if mrrs else 0.0
         s = score(recall_avg, ndcg_avg)
-        print(f"{stage_name:<12} {recall_avg:<12.4f} {ndcg_avg:<12.4f} {s:<10.4f}")
+        summary[stage_name] = {"recall": recall_avg, "ndcg": ndcg_avg, "mrr": mrr_avg, "score": s}
+        print(f"{stage_name:<12} {recall_avg:<12.4f} {ndcg_avg:<12.4f} {mrr_avg:<12.4f} {s:<10.4f}")
+
+    if baseline:
+        print(f"\nDelta vs baseline ({baseline_path}):")
+        for stage_name in ordered:
+            base = baseline.get("stages", {}).get(stage_name)
+            if not base:
+                continue
+            current = summary[stage_name]
+            deltas = "  ".join(
+                f"{metric}={current[metric] - base.get(metric, 0.0):+.4f}"
+                for metric in ("recall", "ndcg", "mrr", "score")
+            )
+            print(f"  {stage_name:<12} {deltas}")
+
+    if save_baseline_path:
+        save_baseline_path.write_text(
+            json.dumps({"dataset": str(dataset_path), "k": k, "n": len(entries), "stages": summary}, indent=2)
+        )
+        print(f"\nBaseline saved to {save_baseline_path}")
 
     if misses:
         print(f"\nMisses ({len(misses)}):")
@@ -105,8 +146,17 @@ def main() -> None:
     p.add_argument("--k", type=int, default=50)
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--stages", action="store_true", help="hit /_debug/search and report per-stage metrics")
+    p.add_argument("--baseline", type=Path, default=None, help="baseline JSON to compare against")
+    p.add_argument("--save-baseline", type=Path, default=None, help="write current results as baseline JSON")
     args = p.parse_args()
-    run(args.dataset, args.k, args.verbose, args.stages)
+
+    baseline_path = args.baseline
+    if baseline_path is None:
+        default_baseline = Path("eval/baseline.json")
+        if default_baseline.is_file():
+            baseline_path = default_baseline
+
+    run(args.dataset, args.k, args.verbose, args.stages, baseline_path, args.save_baseline)
 
 
 if __name__ == "__main__":

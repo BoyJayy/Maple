@@ -16,7 +16,7 @@ from config import (
     TECHNICAL_TRACE_MARKERS,
     logger,
 )
-from schemas import Chat, IndexAPIItem, Message
+from schemas import Chat, IndexAPIItem, Message, MessageBlock
 
 
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
@@ -314,11 +314,16 @@ def build_sparse_content(chat: Chat, context_messages: list[NormalizedMessage], 
 
 def build_chunk_item(chat: Chat, context_messages: list[NormalizedMessage], chunk_messages: list[NormalizedMessage]) -> IndexAPIItem:
     message_ids = list(dict.fromkeys(message.id for message in chunk_messages))
+    message_blocks = [
+        MessageBlock(message_id=message.id, text=format_page_message(message))
+        for message in chunk_messages
+    ]
     return IndexAPIItem(
         page_content=build_page_content(chat, context_messages, chunk_messages),
         dense_content=build_dense_content(chat, context_messages, chunk_messages),
         sparse_content=build_sparse_content(chat, context_messages, chunk_messages),
         message_ids=message_ids,
+        message_blocks=message_blocks,
     )
 
 

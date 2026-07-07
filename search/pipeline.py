@@ -7,19 +7,39 @@ from fastembed import SparseTextEmbedding, TextEmbedding
 from qdrant_client import AsyncQdrantClient, models
 
 from config import (
+    ASSEMBLE_BLOCK_HIT_WEIGHT,
+    ASSEMBLE_BLOCK_INDEX_PENALTY,
     DENSE_MODEL_NAME,
     DENSE_PREFETCH_K,
+    DENSE_QUERY_PREFIX,
     FINAL_MESSAGE_LIMIT,
     FUSION_MODE,
     QDRANT_COLLECTION_NAME,
     QDRANT_DENSE_VECTOR_NAME,
     QDRANT_SPARSE_VECTOR_NAME,
+    RERANK_ENABLED,
+    RERANK_MAX_DOC_CHARS,
+    RERANK_MODEL_NAME,
+    RERANK_TOP_K,
+    RESCORE_CONTEXT_HIT_WEIGHT,
+    RESCORE_MESSAGE_HIT_WEIGHT,
+    RESCORE_METADATA_HIT_WEIGHT,
+    RESCORE_RANK_BONUS_MAX,
+    RESCORE_RANK_BONUS_STEP,
     RETRIEVE_K,
+    SPARSE_MODEL_LANGUAGE,
     SPARSE_MODEL_NAME,
     SPARSE_PREFETCH_K,
+    TIME_FILTER_ENABLED,
     logger,
 )
-from querying import SearchContext, build_search_context, dedupe_message_ids, normalize_text
+from querying import (
+    SearchContext,
+    build_search_context,
+    count_stem_hits,
+    dedupe_message_ids,
+    normalize_text,
+)
 from schemas import SearchAPIRequest, SparseVector
 
 
@@ -34,16 +54,27 @@ def get_dense_model() -> TextEmbedding:
 
 @lru_cache(maxsize=1)
 def get_sparse_model() -> SparseTextEmbedding:
-    logger.info("Loading sparse model %s", SPARSE_MODEL_NAME)
+    logger.info("Loading sparse model %s (language=%s)", SPARSE_MODEL_NAME, SPARSE_MODEL_LANGUAGE)
+    if SPARSE_MODEL_NAME == "Qdrant/bm25":
+        return SparseTextEmbedding(model_name=SPARSE_MODEL_NAME, language=SPARSE_MODEL_LANGUAGE)
     return SparseTextEmbedding(model_name=SPARSE_MODEL_NAME)
+
+
+@lru_cache(maxsize=1)
+def get_reranker() -> Any:
+    from fastembed.rerank.cross_encoder import TextCrossEncoder
+
+    logger.info("Loading reranker model %s", RERANK_MODEL_NAME)
+    return TextCrossEncoder(model_name=RERANK_MODEL_NAME)
 
 
 async def embed_dense(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
+    prefixed = [f"{DENSE_QUERY_PREFIX}{text}" for text in texts]
 
     def _run() -> list[list[float]]:
-        return [vector.tolist() for vector in get_dense_model().embed(texts)]
+        return [vector.tolist() for vector in get_dense_model().embed(prefixed)]
 
     return await asyncio.to_thread(_run)
 
@@ -66,12 +97,25 @@ async def embed_sparse(texts: list[str]) -> list[SparseVector]:
     return await asyncio.to_thread(_run)
 
 
+def build_time_filter(ctx: SearchContext) -> models.Filter | None:
+    if not TIME_FILTER_ENABLED or ctx.time_range is None:
+        return None
+    start, end = ctx.time_range
+    return models.Filter(
+        must=[
+            models.FieldCondition(key="metadata.start", range=models.Range(lte=end)),
+            models.FieldCondition(key="metadata.end", range=models.Range(gte=start)),
+        ]
+    )
+
+
 async def qdrant_search(
     qdrant_client: AsyncQdrantClient,
     *,
     dense_vectors: list[list[float]],
     sparse_vectors: list[SparseVector],
     fusion: str,
+    query_filter: models.Filter | None = None,
 ) -> list[Any]:
     prefetch: list[models.Prefetch] = []
     for dense_vector in dense_vectors:
@@ -80,6 +124,7 @@ async def qdrant_search(
                 query=dense_vector,
                 using=QDRANT_DENSE_VECTOR_NAME,
                 limit=DENSE_PREFETCH_K,
+                filter=query_filter,
             )
         )
     for sparse_vector in sparse_vectors:
@@ -91,6 +136,7 @@ async def qdrant_search(
                 ),
                 using=QDRANT_SPARSE_VECTOR_NAME,
                 limit=SPARSE_PREFETCH_K,
+                filter=query_filter,
             )
         )
 
@@ -122,6 +168,22 @@ def extract_message_ids(point: Any) -> list[str]:
     return [str(message_id) for message_id in (get_metadata(point).get("message_ids") or [])]
 
 
+def extract_stored_blocks(point: Any) -> list[tuple[str, str]]:
+    """Return (message_id, text) pairs stored by the index service, if present."""
+    blocks = get_metadata(point).get("message_blocks")
+    if not isinstance(blocks, list):
+        return []
+    pairs: list[tuple[str, str]] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            return []
+        message_id = str(block.get("message_id") or "")
+        if not message_id:
+            return []
+        pairs.append((message_id, str(block.get("text") or "")))
+    return pairs
+
+
 def split_sections(page_content: str) -> tuple[str, str]:
     if "MESSAGES:" not in page_content:
         return "", page_content
@@ -132,6 +194,12 @@ def split_sections(page_content: str) -> tuple[str, str]:
     return normalize_text(context).lower(), normalize_text(messages).lower()
 
 
+def extract_messages_section(page_content: str) -> str:
+    if "MESSAGES:" not in page_content:
+        return page_content
+    return page_content.split("MESSAGES:", 1)[1].strip()
+
+
 def extract_message_blocks(page_content: str) -> list[str]:
     if "MESSAGES:" not in page_content:
         return []
@@ -139,9 +207,8 @@ def extract_message_blocks(page_content: str) -> list[str]:
     return [block.strip() for block in MESSAGE_BLOCK_SPLIT_RE.split(messages_text) if block.strip()]
 
 
-def count_term_hits(text: str, exact_terms: tuple[str, ...]) -> int:
-    lowered = normalize_text(text).lower()
-    return sum(1 for term in exact_terms if term and term in lowered)
+def rank_bonus(rank: int) -> float:
+    return max(0.0, RESCORE_RANK_BONUS_MAX - rank * RESCORE_RANK_BONUS_STEP)
 
 
 def score_point(ctx: SearchContext, point: Any, *, rank: int) -> float:
@@ -155,13 +222,16 @@ def score_point(ctx: SearchContext, point: Any, *, rank: int) -> float:
         ]
     ).lower()
 
-    base_score = float(getattr(point, "score", 0.0) or 0.0)
-    message_hits = count_term_hits(message_text, ctx.exact_terms)
-    context_hits = count_term_hits(context_text, ctx.exact_terms)
-    metadata_hits = count_term_hits(metadata_text, ctx.exact_terms)
-    rank_bonus = max(0.0, 0.2 - rank * 0.005)
+    message_hits = count_stem_hits(message_text, ctx.exact_stems)
+    context_hits = count_stem_hits(context_text, ctx.exact_stems)
+    metadata_hits = count_stem_hits(metadata_text, ctx.exact_stems)
 
-    return base_score + rank_bonus + (message_hits * 0.04) + (context_hits * 0.01) + (metadata_hits * 0.02)
+    return (
+        rank_bonus(rank)
+        + (message_hits * RESCORE_MESSAGE_HIT_WEIGHT)
+        + (context_hits * RESCORE_CONTEXT_HIT_WEIGHT)
+        + (metadata_hits * RESCORE_METADATA_HIT_WEIGHT)
+    )
 
 
 def rescore_points(ctx: SearchContext, points: list[Any]) -> list[Any]:
@@ -173,6 +243,32 @@ def rescore_points(ctx: SearchContext, points: list[Any]) -> list[Any]:
     return [point for _, _, point in scored]
 
 
+async def rerank_points(ctx: SearchContext, points: list[Any]) -> list[Any]:
+    if len(points) <= 1:
+        return points
+
+    head = points[:RERANK_TOP_K]
+    tail = points[RERANK_TOP_K:]
+    documents = [
+        extract_messages_section(str(get_payload(point).get("page_content") or ""))[:RERANK_MAX_DOC_CHARS]
+        for point in head
+    ]
+
+    def _run() -> list[float]:
+        return [float(score) for score in get_reranker().rerank(ctx.primary_query, documents)]
+
+    scores = await asyncio.to_thread(_run)
+    reranked = [
+        point
+        for _, _, point in sorted(
+            ((score, -index, point) for index, (score, point) in enumerate(zip(scores, head, strict=True))),
+            key=lambda item: (item[0], item[1]),
+            reverse=True,
+        )
+    ]
+    return [*reranked, *tail]
+
+
 def assemble_message_ids(ctx: SearchContext, points: list[Any], *, limit: int) -> list[str]:
     scored_messages: list[tuple[float, int, int, str]] = []
 
@@ -181,17 +277,32 @@ def assemble_message_ids(ctx: SearchContext, points: list[Any], *, limit: int) -
         if not message_ids:
             continue
 
-        blocks = extract_message_blocks(str(get_payload(point).get("page_content") or ""))
-        point_bonus = max(0.0, 0.2 - point_rank * 0.005)
+        point_bonus = rank_bonus(point_rank)
 
+        stored_blocks = extract_stored_blocks(point)
+        if stored_blocks:
+            for block_index, (message_id, block_text) in enumerate(stored_blocks):
+                block_score = (
+                    point_bonus
+                    + (count_stem_hits(block_text, ctx.exact_stems) * ASSEMBLE_BLOCK_HIT_WEIGHT)
+                    - (block_index * ASSEMBLE_BLOCK_INDEX_PENALTY)
+                )
+                scored_messages.append((block_score, -point_rank, -block_index, message_id))
+            continue
+
+        blocks = extract_message_blocks(str(get_payload(point).get("page_content") or ""))
         if len(blocks) == len(message_ids):
             for block_index, (message_id, block) in enumerate(zip(message_ids, blocks, strict=True)):
-                block_score = point_bonus + (count_term_hits(block, ctx.exact_terms) * 0.05) - (block_index * 0.01)
+                block_score = (
+                    point_bonus
+                    + (count_stem_hits(block, ctx.exact_stems) * ASSEMBLE_BLOCK_HIT_WEIGHT)
+                    - (block_index * ASSEMBLE_BLOCK_INDEX_PENALTY)
+                )
                 scored_messages.append((block_score, -point_rank, -block_index, message_id))
             continue
 
         for block_index, message_id in enumerate(message_ids):
-            fallback_score = point_bonus - (block_index * 0.01)
+            fallback_score = point_bonus - (block_index * ASSEMBLE_BLOCK_INDEX_PENALTY)
             scored_messages.append((fallback_score, -point_rank, -block_index, message_id))
 
     scored_messages.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
@@ -208,6 +319,7 @@ async def run_search_pipeline(
     max_dense: int | None = None,
     max_sparse: int | None = None,
     skip_rescore: bool = False,
+    skip_rerank: bool = False,
 ) -> tuple[list[str], dict[str, list[str]]]:
     ctx = build_search_context(payload.question)
     if not ctx.primary_query:
@@ -229,6 +341,7 @@ async def run_search_pipeline(
         dense_vectors=dense_vectors,
         sparse_vectors=sparse_vectors,
         fusion=fusion or FUSION_MODE,
+        query_filter=build_time_filter(ctx),
     )
     if not points:
         return [], {}
@@ -241,6 +354,11 @@ async def run_search_pipeline(
         points = rescore_points(ctx, points)
         if collect_stages:
             stages["rescored"] = assemble_message_ids(ctx, points, limit=FINAL_MESSAGE_LIMIT)
+
+    if RERANK_ENABLED and not skip_rerank:
+        points = await rerank_points(ctx, points)
+        if collect_stages:
+            stages["reranked"] = assemble_message_ids(ctx, points, limit=FINAL_MESSAGE_LIMIT)
 
     final_message_ids = assemble_message_ids(ctx, points, limit=FINAL_MESSAGE_LIMIT)
     return final_message_ids, stages

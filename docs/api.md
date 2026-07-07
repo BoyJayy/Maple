@@ -23,6 +23,10 @@ Response:
 }
 ```
 
+### GET /ready
+
+Returns `200 {"status": "ok"}` once the service has started and warmed up its models.
+
 ### POST /index
 
 Builds searchable chunks from a chat payload.
@@ -88,7 +92,13 @@ Response body:
       "page_content": "string",
       "dense_content": "string",
       "sparse_content": "string",
-      "message_ids": ["string"]
+      "message_ids": ["string"],
+      "message_blocks": [
+        {
+          "message_id": "string",
+          "text": "string"
+        }
+      ]
     }
   ]
 }
@@ -99,6 +109,7 @@ Response fields:
 - `dense_content` — text for dense embeddings
 - `sparse_content` — text for sparse embeddings
 - `message_ids` — message ids covered by the chunk
+- `message_blocks` — ordered `{message_id, text}` pairs, one per rendered message
 
 ### POST /sparse_embedding
 
@@ -138,6 +149,10 @@ Response:
   "status": "ok"
 }
 ```
+
+### GET /ready
+
+Returns `200 {"status": "ok"}` when Qdrant is reachable and the collection exists, otherwise `503` with a reason.
 
 ### POST /search
 
@@ -193,15 +208,17 @@ Useful query parameters:
 - `max_dense=1`
 - `max_sparse=2`
 - `no_rescore=true`
+- `no_rerank=true`
 
-Typical response:
+Typical response (the `reranked` stage appears only with `RERANK_ENABLED=1`):
 
 ```json
 {
   "final": ["message-id-1", "message-id-2"],
   "stages": {
     "retrieval": ["message-id-1", "message-id-3"],
-    "rescored": ["message-id-1", "message-id-2"]
+    "rescored": ["message-id-1", "message-id-2"],
+    "reranked": ["message-id-2", "message-id-1"]
   }
 }
 ```
@@ -221,6 +238,8 @@ Typical response:
 - `TECHNICAL_PREVIEW_CHARS`
 - `SPLIT_MESSAGE_CHAR_THRESHOLD`
 - `SPLIT_SEGMENT_TARGET_CHARS`
+- `SPARSE_MODEL_NAME`
+- `SPARSE_MODEL_LANGUAGE`
 
 ### search
 
@@ -233,7 +252,9 @@ Typical response:
 - `QDRANT_SPARSE_VECTOR_NAME`
 - `DENSE_MODEL_NAME`
 - `DENSE_VECTOR_SIZE`
+- `DENSE_QUERY_PREFIX` / `DENSE_DOCUMENT_PREFIX` (auto for E5 models)
 - `SPARSE_MODEL_NAME`
+- `SPARSE_MODEL_LANGUAGE`
 - `FUSION_MODE`
 - `DENSE_PREFETCH_K`
 - `SPARSE_PREFETCH_K`
@@ -241,6 +262,11 @@ Typical response:
 - `MAX_DENSE_QUERIES`
 - `MAX_SPARSE_QUERIES`
 - `FINAL_MESSAGE_LIMIT`
+- `RESCORE_RANK_BONUS_MAX`, `RESCORE_RANK_BONUS_STEP`
+- `RESCORE_MESSAGE_HIT_WEIGHT`, `RESCORE_CONTEXT_HIT_WEIGHT`, `RESCORE_METADATA_HIT_WEIGHT`
+- `ASSEMBLE_BLOCK_HIT_WEIGHT`, `ASSEMBLE_BLOCK_INDEX_PENALTY`
+- `TIME_FILTER_ENABLED`, `TIME_FILTER_MARGIN_SECONDS`
+- `RERANK_ENABLED`, `RERANK_MODEL_NAME`, `RERANK_TOP_K`, `RERANK_MAX_DOC_CHARS`
 
 ## Contract stability
 

@@ -3,3 +3,4 @@ uvicorn[standard]==0.44.0
 pydantic==2.13.2
 qdrant-client==1.17.1
 fastembed==0.8.0
+snowballstemmer==3.1.1

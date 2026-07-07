@@ -21,13 +21,27 @@ curl http://localhost:8002/health
 curl http://localhost:6333/collections
 ```
 
+Readiness checks (models warmed up, Qdrant collection exists):
+
+```bash
+curl http://localhost:8001/ready
+curl http://localhost:8002/ready
+```
+
+Qdrant data is persisted in the `qdrant_storage` Docker volume, so points
+survive container restarts. Remove it with `docker compose down -v` for a
+clean slate.
+
 ## 2. Prepare Python environment for evaluation
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r eval/requirements.txt
+pip install -r requirements-dev.txt
 ```
+
+`requirements-dev.txt` includes the eval dependencies plus `pytest` and the
+libraries needed to run service unit tests locally.
 
 ## 3. Ingest data into Qdrant
 
@@ -59,6 +73,17 @@ If you want to recreate the collection:
 RESET_COLLECTION=1 python3 eval/ingest.py
 ```
 
+Reingest is required after changing `DENSE_MODEL_NAME`, `DENSE_VECTOR_SIZE`
+or `SPARSE_MODEL_LANGUAGE` — vectors and payload schema must match the new
+settings (`RESET_COLLECTION=1` is the easiest way).
+
+Synthetic JSONL datasets are ingested as one hand-made chunk per answer by
+default. To route them through the real `/index` chunking pipeline instead:
+
+```bash
+SYNTHETIC_VIA_INDEX=1 DATA_PATH=data/Dataset_main_questions.jsonl python3 eval/ingest.py
+```
+
 ## 4. Run search evaluation
 
 Main dataset:
@@ -78,6 +103,30 @@ Sweep dataset:
 ```bash
 python3 eval/run.py --dataset data/Dataset_sweep_questions.jsonl --k 50
 ```
+
+The report includes Recall@K, nDCG@K and MRR@K per stage.
+
+Baselines for regression checks:
+
+```bash
+# freeze current results
+python3 eval/run.py --dataset data/Dataset_main_questions.jsonl --k 50 --save-baseline eval/baseline.json
+
+# later runs automatically compare against eval/baseline.json if it exists,
+# or pass an explicit file:
+python3 eval/run.py --dataset data/Dataset_main_questions.jsonl --k 50 --baseline eval/baseline.json
+```
+
+## 4a. Run unit tests
+
+```bash
+sh scripts/run_tests.sh
+```
+
+The script runs three pytest suites (`tests/index_service`,
+`tests/search_service`, `tests/eval_service`) in separate processes because
+`index/` and `search/` both have top-level `config.py` / `schemas.py`
+modules and cannot be imported into one interpreter.
 
 ## 5. Manual API checks
 
@@ -155,6 +204,20 @@ Useful search variables:
 - `RETRIEVE_K`
 - `MAX_DENSE_QUERIES`
 - `MAX_SPARSE_QUERIES`
+- `RESCORE_*` / `ASSEMBLE_*` — rescoring weights
+- `TIME_FILTER_ENABLED=0|1`
+- `RERANK_ENABLED=1` — local cross-encoder rerank (slower, better ordering)
+
+Switching to a stronger dense model (needs `RESET_COLLECTION=1` reingest):
+
+```bash
+DENSE_MODEL_NAME=intfloat/multilingual-e5-large \
+DENSE_VECTOR_SIZE=1024 \
+docker compose up --build
+# then: DENSE_MODEL_NAME=intfloat/multilingual-e5-large DENSE_VECTOR_SIZE=1024 \
+#       RESET_COLLECTION=1 python3 eval/ingest.py
+```
+E5 `query:` / `passage:` prefixes are applied automatically.
 
 Useful index variables:
 - `MAX_CHUNK_CHARS`

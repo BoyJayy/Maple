@@ -3,39 +3,20 @@ services:
     image: qdrant/qdrant:v1.14.1
     ports:
       - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
 
   qdrant-init:
     image: curlimages/curl:8.12.1
     depends_on:
       - qdrant
     environment:
+      QDRANT_HOST: http://qdrant:6333
       QDRANT_COLLECTION_NAME: ${QDRANT_COLLECTION_NAME:-messages}
       DENSE_VECTOR_SIZE: ${DENSE_VECTOR_SIZE:-384}
-    command:
-      - sh
-      - -c
-      - |
-        until curl -sf http://qdrant:6333/collections; do
-          sleep 1
-        done
-        if curl -sf "http://qdrant:6333/collections/$QDRANT_COLLECTION_NAME" >/dev/null; then
-          exit 0
-        fi
-        curl -sf -X PUT "http://qdrant:6333/collections/$QDRANT_COLLECTION_NAME" \
-          -H 'Content-Type: application/json' \
-          -d '{
-            "vectors": {
-              "dense": {
-                "size": '"$DENSE_VECTOR_SIZE"',
-                "distance": "Cosine"
-              }
-            },
-            "sparse_vectors": {
-              "sparse": {
-                "modifier": "idf"
-              }
-            }
-          }'
+    volumes:
+      - ./scripts/qdrant_init.sh:/qdrant_init.sh:ro
+    entrypoint: ["sh", "/qdrant_init.sh"]
     restart: "no"
 
   index:
@@ -53,6 +34,7 @@ services:
       TECHNICAL_PREVIEW_CHARS: ${TECHNICAL_PREVIEW_CHARS:-1800}
       SPLIT_MESSAGE_CHAR_THRESHOLD: ${SPLIT_MESSAGE_CHAR_THRESHOLD:-1200}
       SPLIT_SEGMENT_TARGET_CHARS: ${SPLIT_SEGMENT_TARGET_CHARS:-650}
+      SPARSE_MODEL_LANGUAGE: ${SPARSE_MODEL_LANGUAGE:-russian}
     ports:
       - "8001:8000"
 
@@ -70,11 +52,19 @@ services:
       DENSE_MODEL_NAME: ${DENSE_MODEL_NAME:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
       DENSE_VECTOR_SIZE: ${DENSE_VECTOR_SIZE:-384}
       SPARSE_MODEL_NAME: ${SPARSE_MODEL_NAME:-Qdrant/bm25}
+      SPARSE_MODEL_LANGUAGE: ${SPARSE_MODEL_LANGUAGE:-russian}
       FUSION_MODE: ${FUSION_MODE:-dbsf}
       MAX_DENSE_QUERIES: ${MAX_DENSE_QUERIES:-3}
       MAX_SPARSE_QUERIES: ${MAX_SPARSE_QUERIES:-3}
       DENSE_PREFETCH_K: ${DENSE_PREFETCH_K:-40}
       SPARSE_PREFETCH_K: ${SPARSE_PREFETCH_K:-40}
       RETRIEVE_K: ${RETRIEVE_K:-60}
+      TIME_FILTER_ENABLED: ${TIME_FILTER_ENABLED:-1}
+      RERANK_ENABLED: ${RERANK_ENABLED:-0}
+      RERANK_MODEL_NAME: ${RERANK_MODEL_NAME:-jinaai/jina-reranker-v2-base-multilingual}
+      RERANK_TOP_K: ${RERANK_TOP_K:-30}
     ports:
       - "8002:8000"
+
+volumes:
+  qdrant_storage:

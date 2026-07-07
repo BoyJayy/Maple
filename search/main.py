@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -6,9 +7,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from qdrant_client import AsyncQdrantClient
 
-from config import HOST, PORT, QDRANT_API_KEY, QDRANT_URL, logger
-from pipeline import run_search_pipeline
+from config import HOST, PORT, QDRANT_API_KEY, QDRANT_COLLECTION_NAME, QDRANT_URL, RERANK_ENABLED, logger
+from pipeline import get_dense_model, get_reranker, get_sparse_model, run_search_pipeline
 from schemas import SearchAPIItem, SearchAPIRequest, SearchAPIResponse
+
+
+async def warmup_models() -> None:
+    warmups = [asyncio.to_thread(get_dense_model), asyncio.to_thread(get_sparse_model)]
+    if RERANK_ENABLED:
+        warmups.append(asyncio.to_thread(get_reranker))
+    await asyncio.gather(*warmups)
+    logger.info("Models warmed up")
 
 
 @asynccontextmanager
@@ -17,6 +26,7 @@ async def lifespan(app: FastAPI):
         url=QDRANT_URL,
         api_key=QDRANT_API_KEY,
     )
+    await warmup_models()
     try:
         yield
     finally:
@@ -29,6 +39,20 @@ app = FastAPI(title="Search Service", version="0.1.0", lifespan=lifespan)
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready() -> JSONResponse:
+    try:
+        exists = await app.state.qdrant.collection_exists(QDRANT_COLLECTION_NAME)
+    except Exception as exc:
+        return JSONResponse(status_code=503, content={"status": "qdrant unavailable", "detail": str(exc)})
+    if not exists:
+        return JSONResponse(
+            status_code=503,
+            content={"status": f"collection {QDRANT_COLLECTION_NAME} not found"},
+        )
+    return JSONResponse(content={"status": "ok"})
 
 
 @app.post("/search", response_model=SearchAPIResponse)
@@ -62,6 +86,7 @@ async def search_debug(
             app.state.qdrant,
             payload,
             skip_rescore=no_rescore,
+            skip_rerank=no_rerank,
             collect_stages=True,
             fusion=fusion,
             max_dense=max_dense,

@@ -21,7 +21,8 @@ The `index` service converts raw chat payloads into searchable chunks. It does n
 
 ## Endpoints
 
-- `GET /health`
+- `GET /health` — liveness
+- `GET /ready` — readiness (models are warmed up at startup)
 - `POST /index`
 - `POST /sparse_embedding`
 
@@ -34,7 +35,7 @@ chat + overlap_messages + new_messages
   -> filter noise
   -> split long content
   -> build chunks
-  -> return page_content, dense_content, sparse_content, message_ids
+  -> return page_content, dense_content, sparse_content, message_ids, message_blocks
 ```
 
 ## Input data
@@ -115,9 +116,21 @@ Token preserving text used to compute sparse embeddings.
 
 The ordered list of message ids represented by the chunk.
 
+### message_blocks
+
+Ordered `{message_id, text}` pairs, one per rendered message (including
+fragments of a split message, which share one `message_id`). The search
+service uses them to score individual messages inside a chunk without
+parsing `page_content`.
+
 ## Sparse embeddings
 
 `POST /sparse_embedding` accepts a list of texts and returns sparse vectors compatible with Qdrant. The service uses `fastembed` with `Qdrant/bm25` by default.
+
+BM25 tokenization uses Snowball stemming controlled by
+`SPARSE_MODEL_LANGUAGE` (default `russian`; Latin tokens pass through the
+Russian stemmer unchanged). The search service must use the same value,
+and changing it requires reingesting the collection.
 
 ## What the service does not do
 
