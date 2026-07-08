@@ -57,13 +57,16 @@ def main() -> None:
     entries = load_dataset(args.dataset)[: args.limit]
     print(f"N={len(entries)}  K={args.k}")
 
+    # Query counts are capped by MAX_DENSE_QUERIES/MAX_SPARSE_QUERIES (default 3),
+    # so meaningful variants go below the cap, not above it.
     configs = [
         ("rrf, full", {"fusion": "rrf"}),
         ("dbsf, full", {"fusion": "dbsf"}),
-        ("rrf, 3+3", {"fusion": "rrf", "max_dense": 3, "max_sparse": 3}),
-        ("dbsf, 3+3", {"fusion": "dbsf", "max_dense": 3, "max_sparse": 3}),
-        ("rrf, 5+5", {"fusion": "rrf", "max_dense": 5, "max_sparse": 5}),
-        ("dbsf, 5+5", {"fusion": "dbsf", "max_dense": 5, "max_sparse": 5}),
+        ("rrf, 1+1", {"fusion": "rrf", "max_dense": 1, "max_sparse": 1}),
+        ("dbsf, 1+1", {"fusion": "dbsf", "max_dense": 1, "max_sparse": 1}),
+        ("rrf, 2+2", {"fusion": "rrf", "max_dense": 2, "max_sparse": 2}),
+        ("dbsf, 2+2", {"fusion": "dbsf", "max_dense": 2, "max_sparse": 2}),
+        ("dbsf, full, no_rescore", {"fusion": "dbsf", "no_rescore": "true"}),
     ]
 
     header = f"{'config':<25} {'R@'+str(args.k):<10} {'nDCG@'+str(args.k):<10} {'score':<10} {'time':<8}"

@@ -22,6 +22,8 @@ services:
   index:
     build:
       context: ./index
+      args:
+        SPARSE_MODEL_NAME: ${SPARSE_MODEL_NAME:-Qdrant/bm25}
     depends_on:
       - qdrant
     environment:
@@ -34,13 +36,19 @@ services:
       TECHNICAL_PREVIEW_CHARS: ${TECHNICAL_PREVIEW_CHARS:-1800}
       SPLIT_MESSAGE_CHAR_THRESHOLD: ${SPLIT_MESSAGE_CHAR_THRESHOLD:-1200}
       SPLIT_SEGMENT_TARGET_CHARS: ${SPLIT_SEGMENT_TARGET_CHARS:-650}
+      SPARSE_MODEL_NAME: ${SPARSE_MODEL_NAME:-Qdrant/bm25}
       SPARSE_MODEL_LANGUAGE: ${SPARSE_MODEL_LANGUAGE:-russian}
+    volumes:
+      - index_models:/models
     ports:
       - "8001:8000"
 
   search:
     build:
       context: ./search
+      args:
+        DENSE_MODEL_NAME: ${DENSE_MODEL_NAME:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+        SPARSE_MODEL_NAME: ${SPARSE_MODEL_NAME:-Qdrant/bm25}
     depends_on:
       qdrant-init:
         condition: service_completed_successfully
@@ -59,12 +67,28 @@ services:
       DENSE_PREFETCH_K: ${DENSE_PREFETCH_K:-40}
       SPARSE_PREFETCH_K: ${SPARSE_PREFETCH_K:-40}
       RETRIEVE_K: ${RETRIEVE_K:-60}
+      FINAL_MESSAGE_LIMIT: ${FINAL_MESSAGE_LIMIT:-50}
+      RESCORE_RANK_BONUS_MAX: ${RESCORE_RANK_BONUS_MAX:-0.2}
+      RESCORE_RANK_BONUS_STEP: ${RESCORE_RANK_BONUS_STEP:-0.005}
+      RESCORE_MESSAGE_HIT_WEIGHT: ${RESCORE_MESSAGE_HIT_WEIGHT:-0.04}
+      RESCORE_CONTEXT_HIT_WEIGHT: ${RESCORE_CONTEXT_HIT_WEIGHT:-0.01}
+      RESCORE_METADATA_HIT_WEIGHT: ${RESCORE_METADATA_HIT_WEIGHT:-0.02}
+      ASSEMBLE_BLOCK_HIT_WEIGHT: ${ASSEMBLE_BLOCK_HIT_WEIGHT:-0.05}
+      ASSEMBLE_BLOCK_INDEX_PENALTY: ${ASSEMBLE_BLOCK_INDEX_PENALTY:-0.01}
       TIME_FILTER_ENABLED: ${TIME_FILTER_ENABLED:-1}
+      TIME_FILTER_MARGIN_SECONDS: ${TIME_FILTER_MARGIN_SECONDS:-86400}
       RERANK_ENABLED: ${RERANK_ENABLED:-0}
       RERANK_MODEL_NAME: ${RERANK_MODEL_NAME:-jinaai/jina-reranker-v2-base-multilingual}
       RERANK_TOP_K: ${RERANK_TOP_K:-30}
+      RERANK_MAX_DOC_CHARS: ${RERANK_MAX_DOC_CHARS:-2000}
+    volumes:
+      # Persists runtime model downloads (e.g. the reranker or a dense model
+      # switched via env without --build) across container recreations.
+      - search_models:/models
     ports:
       - "8002:8000"
 
 volumes:
   qdrant_storage:
+  index_models:
+  search_models:

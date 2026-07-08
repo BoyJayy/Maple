@@ -336,29 +336,53 @@ async def run_search_pipeline(
         embed_dense(dense_queries),
         embed_sparse(sparse_queries),
     )
+    query_filter = build_time_filter(ctx)
     points = await qdrant_search(
         qdrant_client,
         dense_vectors=dense_vectors,
         sparse_vectors=sparse_vectors,
         fusion=fusion or FUSION_MODE,
-        query_filter=build_time_filter(ctx),
+        query_filter=query_filter,
     )
+    if not points and query_filter is not None:
+        # The time filter is a precision optimization, not a correctness gate:
+        # question dates may refer to content rather than message time, and
+        # collections ingested before the integer start/end migration do not
+        # match Range conditions at all. Zero filtered hits -> retry unfiltered.
+        logger.warning("Time-filtered search returned no points, retrying without time filter")
+        points = await qdrant_search(
+            qdrant_client,
+            dense_vectors=dense_vectors,
+            sparse_vectors=sparse_vectors,
+            fusion=fusion or FUSION_MODE,
+            query_filter=None,
+        )
     if not points:
         return [], {}
 
+    # Rescoring and assembly stem every candidate's text: CPU-bound, so keep
+    # them off the event loop (text_stems memoizes repeats across stages).
     stages: dict[str, list[str]] = {}
     if collect_stages:
-        stages["retrieval"] = assemble_message_ids(ctx, points, limit=FINAL_MESSAGE_LIMIT)
+        stages["retrieval"] = await asyncio.to_thread(
+            assemble_message_ids, ctx, points, limit=FINAL_MESSAGE_LIMIT
+        )
 
     if not skip_rescore:
-        points = rescore_points(ctx, points)
+        points = await asyncio.to_thread(rescore_points, ctx, points)
         if collect_stages:
-            stages["rescored"] = assemble_message_ids(ctx, points, limit=FINAL_MESSAGE_LIMIT)
+            stages["rescored"] = await asyncio.to_thread(
+                assemble_message_ids, ctx, points, limit=FINAL_MESSAGE_LIMIT
+            )
 
     if RERANK_ENABLED and not skip_rerank:
         points = await rerank_points(ctx, points)
         if collect_stages:
-            stages["reranked"] = assemble_message_ids(ctx, points, limit=FINAL_MESSAGE_LIMIT)
+            stages["reranked"] = await asyncio.to_thread(
+                assemble_message_ids, ctx, points, limit=FINAL_MESSAGE_LIMIT
+            )
 
-    final_message_ids = assemble_message_ids(ctx, points, limit=FINAL_MESSAGE_LIMIT)
+    final_message_ids = await asyncio.to_thread(
+        assemble_message_ids, ctx, points, limit=FINAL_MESSAGE_LIMIT
+    )
     return final_message_ids, stages

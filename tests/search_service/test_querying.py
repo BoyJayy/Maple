@@ -5,10 +5,11 @@ from querying import (
     dedupe_message_ids,
     extract_exact_terms,
     extract_time_range,
+    iter_tokens,
     normalize_text,
     stem_token,
 )
-from schemas import DateRange, Question
+from schemas import DateRange, Entities, Question
 
 
 def test_normalize_text_collapses_whitespace():
@@ -49,6 +50,42 @@ def test_extract_exact_terms_is_limited():
     assert len(extract_exact_terms(question)) <= 12
 
 
+def test_extract_exact_terms_drops_stopwords():
+    question = Question(text="Подскажи пожалуйста, что мы в итоге решили про сроки релиза?")
+    terms = extract_exact_terms(question)
+    for filler in ("подскажи", "пожалуйста", "что", "итоге", "решили", "про"):
+        assert filler not in terms
+    assert "сроки" in terms
+    assert "релиза" in terms
+
+
+def test_extract_exact_terms_prioritizes_entities_over_question_filler():
+    question = Question(
+        text="Подскажи пожалуйста, что мы в итоге решили про сроки релиза мобильного "
+        "приложения, когда планируем выкатывать и кто отвечает за подготовку?",
+        keywords=["релиз", "мобильное приложение", "сроки"],
+        entities=Entities(people=["Иван Петров"], documents=["release-plan.docx"]),
+    )
+    terms = extract_exact_terms(question)
+    assert "иван" in terms
+    assert "петров" in terms
+    assert "release-plan.docx" in terms
+
+
+def test_iter_tokens_strips_sentence_punctuation():
+    assert iter_tokens("вышла версия 1.18.") == ["вышла", "версия", "1.18"]
+    assert iter_tokens("см. релиза.") == ["см", "релиза"]
+
+
+def test_count_stem_hits_matches_identifier_before_punctuation():
+    assert count_stem_hits("уже обновились до 1.18.", ("1.18",)) == 1
+
+
+def test_count_stem_hits_matches_word_inside_compound_identifier():
+    stems = (stem_token("plan"),)
+    assert count_stem_hits("файл release-plan.docx приложен", stems) == 1
+
+
 def test_extract_time_range_from_date_mentions():
     question = Question(text="что было", date_mentions=["обсуждали 2023-05"])
     time_range = extract_time_range(question)
@@ -69,6 +106,18 @@ def test_extract_time_range_from_date_range():
     start, end = time_range
     assert start < end
     assert end - start >= 86400
+
+
+def test_extract_time_range_date_only_to_covers_whole_day():
+    question = Question(
+        text="что было",
+        date_range=DateRange.model_validate({"from": "2023-05-01", "to": "2023-05-01"}),
+    )
+    time_range = extract_time_range(question)
+    assert time_range is not None
+    start, end = time_range
+    # 2023-05-01 00:00:00 .. 23:59:59 plus the margin on both sides.
+    assert end - start == 86400 - 1 + 2 * TIME_FILTER_MARGIN_SECONDS
 
 
 def test_extract_time_range_absent_without_dates():

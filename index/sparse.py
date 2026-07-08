@@ -19,7 +19,7 @@ def get_sparse_model():
     return SparseTextEmbedding(model_name=SPARSE_MODEL_NAME)
 
 
-def embed_sparse_texts(texts: list[str]) -> list[SparseVector]:
+def embed_sparse_texts(texts: list[str]) -> list[dict[str, list[int] | list[float]]]:
     model = get_sparse_model()
     vectors: list[dict[str, list[int] | list[float]]] = []
 

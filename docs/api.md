@@ -252,7 +252,8 @@ Typical response (the `reranked` stage appears only with `RERANK_ENABLED=1`):
 - `QDRANT_SPARSE_VECTOR_NAME`
 - `DENSE_MODEL_NAME`
 - `DENSE_VECTOR_SIZE`
-- `DENSE_QUERY_PREFIX` / `DENSE_DOCUMENT_PREFIX` (auto for E5 models)
+- `DENSE_QUERY_PREFIX` (auto for E5 models; the document-side
+  `DENSE_DOCUMENT_PREFIX` belongs to `eval/ingest.py`)
 - `SPARSE_MODEL_NAME`
 - `SPARSE_MODEL_LANGUAGE`
 - `FUSION_MODE`

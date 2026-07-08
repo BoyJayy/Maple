@@ -1,5 +1,12 @@
 CLAUDE.md
 
+# Local environment overrides
+.env
+.env.*
+
+# eval/baseline.json is committed on purpose: it is the regression reference
+# that `eval/run.py --baseline` compares against.
+
 # OS / editors
 .DS_Store
 .idea/

@@ -1,0 +1,26 @@
+{
+  "dataset": "data/Dataset_main_questions.jsonl",
+  "k": 50,
+  "n": 160,
+  "note": "computed via embedded qdrant-client local mode (same code paths); re-save against the docker stack with eval/run.py --save-baseline",
+  "stages": {
+    "retrieval": {
+      "recall": 1.0,
+      "ndcg": 0.7775798393773526,
+      "mrr": 0.7066910866910867,
+      "score": 0.9555159678754706
+    },
+    "rescored": {
+      "recall": 1.0,
+      "ndcg": 0.7735295676059569,
+      "mrr": 0.7009491376678877,
+      "score": 0.9547059135211915
+    },
+    "final": {
+      "recall": 1.0,
+      "ndcg": 0.7735295676059569,
+      "mrr": 0.7009491376678877,
+      "score": 0.9547059135211915
+    }
+  }
+}

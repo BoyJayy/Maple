@@ -43,7 +43,7 @@ def make_chat() -> Chat:
 
 
 def normalized(message: Message):
-    return normalize_message(message, is_overlap=False)
+    return normalize_message(message)
 
 
 def test_normalize_text_strips_blank_lines_and_spaces():

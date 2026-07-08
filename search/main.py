@@ -7,7 +7,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from qdrant_client import AsyncQdrantClient
 
-from config import HOST, PORT, QDRANT_API_KEY, QDRANT_COLLECTION_NAME, QDRANT_URL, RERANK_ENABLED, logger
+from config import (
+    DENSE_VECTOR_SIZE,
+    HOST,
+    PORT,
+    QDRANT_API_KEY,
+    QDRANT_COLLECTION_NAME,
+    QDRANT_DENSE_VECTOR_NAME,
+    QDRANT_URL,
+    RERANK_ENABLED,
+    logger,
+)
 from pipeline import get_dense_model, get_reranker, get_sparse_model, run_search_pipeline
 from schemas import SearchAPIItem, SearchAPIRequest, SearchAPIResponse
 
@@ -45,12 +55,26 @@ async def health() -> dict[str, str]:
 async def ready() -> JSONResponse:
     try:
         exists = await app.state.qdrant.collection_exists(QDRANT_COLLECTION_NAME)
+        if not exists:
+            return JSONResponse(
+                status_code=503,
+                content={"status": f"collection {QDRANT_COLLECTION_NAME} not found"},
+            )
+        info = await app.state.qdrant.get_collection(QDRANT_COLLECTION_NAME)
     except Exception as exc:
         return JSONResponse(status_code=503, content={"status": "qdrant unavailable", "detail": str(exc)})
-    if not exists:
+
+    vectors = getattr(info.config.params, "vectors", None) or {}
+    dense_params = vectors.get(QDRANT_DENSE_VECTOR_NAME) if isinstance(vectors, dict) else None
+    dense_size = getattr(dense_params, "size", None)
+    if dense_size is not None and dense_size != DENSE_VECTOR_SIZE:
         return JSONResponse(
             status_code=503,
-            content={"status": f"collection {QDRANT_COLLECTION_NAME} not found"},
+            content={
+                "status": "dense vector size mismatch",
+                "detail": f"collection has {dense_size}, service configured for {DENSE_VECTOR_SIZE}; "
+                "reingest with RESET_COLLECTION=1 after changing the dense model",
+            },
         )
     return JSONResponse(content={"status": "ok"})
 
@@ -77,7 +101,7 @@ async def search_debug(
     payload: SearchAPIRequest,
     no_rescore: bool = False,
     no_rerank: bool = False,
-    fusion: str = "dbsf",
+    fusion: str | None = None,
     max_dense: int | None = None,
     max_sparse: int | None = None,
 ) -> dict[str, Any]:

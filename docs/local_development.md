@@ -104,7 +104,16 @@ Sweep dataset:
 python3 eval/run.py --dataset data/Dataset_sweep_questions.jsonl --k 50
 ```
 
-The report includes Recall@K, nDCG@K and MRR@K per stage.
+The report includes Recall@K, nDCG@K and MRR@K per stage. Additional knobs:
+
+- `--ks 10,50` reports several cutoffs at once (`--k` keeps the legacy
+  single-cutoff output that `scripts/sweep_chunking.py` parses);
+- when dataset entries carry a `category` field, the final stage is
+  additionally broken down per category;
+- with 10+ questions the final stage gets 95% bootstrap confidence
+  intervals for Recall and nDCG;
+- entries with empty `answer.message_ids` (negative questions) are counted
+  and excluded from ranking metrics.
 
 Baselines for regression checks:
 
@@ -217,7 +226,14 @@ docker compose up --build
 # then: DENSE_MODEL_NAME=intfloat/multilingual-e5-large DENSE_VECTOR_SIZE=1024 \
 #       RESET_COLLECTION=1 python3 eval/ingest.py
 ```
-E5 `query:` / `passage:` prefixes are applied automatically.
+E5 `query:` / `passage:` prefixes are applied automatically. With `--build`
+the configured model is baked into the image (compose passes it as a build
+arg); without a rebuild the model is downloaded once at startup and cached in
+the `search_models` volume. `GET /ready` reports a 503 until the collection
+is reingested with the matching vector size.
+
+`NO_RESCORE=1` / `NO_RERANK=1` work with plain `eval/run.py` runs too — the
+toggles automatically route requests through `/_debug/search`.
 
 Useful index variables:
 - `MAX_CHUNK_CHARS`
@@ -256,6 +272,32 @@ Qdrant retrieval A/B checks:
 ```bash
 python3 scripts/ab_qdrant.py --help
 ```
+
+Build an eval corpus from real Russian dialogues (HF `Den4ikAI/russian_dialogues_2`, MIT):
+
+```bash
+python3 scripts/convert_hf_dialogues.py --count 300
+```
+
+The script downloads dialogues through the free HF datasets-server API
+(rate-limit aware), buckets them by topic so the corpus contains thematic
+distractors, assigns synthetic senders, @mentions, occasional interleaved
+sessions with threads, and deterministic timestamps (so date-anchored
+questions have verifiable ground truth). Output: `data/Dataset_dialogues.json`
+plus `data/Dataset_dialogues_manifest.json` for authoring questions.
+
+The question set `data/Dataset_dialogues_questions.jsonl` (144 questions)
+is tagged by category: `semantic`, `exact`, `date`, `participant`,
+`multihop` and `negative` (no answer in corpus; excluded from ranking
+metrics). Validate any question set against its corpus with:
+
+```bash
+python3 scripts/validate_questions.py \
+  --corpus data/Dataset_dialogues.json \
+  --questions data/Dataset_dialogues_questions.jsonl
+```
+
+Reference results are in `eval/baseline_dialogues.json`.
 
 ## 9. Troubleshooting
 

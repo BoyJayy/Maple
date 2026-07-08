@@ -30,9 +30,10 @@ The current implementation is local-first:
 ## Endpoints
 
 - `GET /health` — liveness
-- `GET /ready` — readiness, checks that the Qdrant collection exists
+- `GET /ready` — readiness: the Qdrant collection exists and its dense vector
+  size matches `DENSE_VECTOR_SIZE` (catches a model switch without reingest)
 - `POST /search`
-- `POST /_debug/search`
+- `POST /_debug/search` (`fusion` defaults to the service `FUSION_MODE`)
 
 ## Search flow
 
@@ -70,16 +71,31 @@ Term matching is morphology aware: tokens are stemmed with Snowball
 (Russian for Cyrillic tokens, English otherwise) and compared on word
 boundaries, so `релиз` matches `релизе` but `код` does not match `кодекс`.
 Tokens with digits or identifier punctuation (emails, links, versions)
-are matched verbatim.
+are matched verbatim; sentence punctuation glued to token edges is stripped,
+and compound identifiers also match by their word parts (`plan` hits
+`release-plan.docx`).
+
+Exact-term extraction prioritizes high-signal sources (entities, then
+keywords, then date mentions, then question text) and drops a small set of
+Russian/English filler words, so the 12-term budget is not consumed by
+`подскажи`, `пожалуйста`, `что` and similar tokens before entities are
+reached.
 
 ## Time filter
 
 If the question carries `date_range` or ISO-like dates inside `date_mentions`
 (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`), the service builds a time window, widens it
 by `TIME_FILTER_MARGIN_SECONDS` and applies it to Qdrant prefetch as a range
-condition over `metadata.start` / `metadata.end`. Controlled by
-`TIME_FILTER_ENABLED`. Requires integer `start` / `end` payload fields
-(written by `eval/ingest.py`) and their payload indexes.
+condition over `metadata.start` / `metadata.end`. A date-only upper bound is
+treated as inclusive end of that day. Controlled by `TIME_FILTER_ENABLED`.
+Requires integer `start` / `end` payload fields (written by
+`eval/ingest.py`) and their payload indexes.
+
+The filter is a precision optimization, not a correctness gate: if the
+filtered search returns zero points (the question date refers to message
+content rather than send time, or the collection predates the integer
+`start`/`end` migration), the service logs a warning and retries the same
+query without the filter instead of returning an empty result.
 
 ## Dense queries
 

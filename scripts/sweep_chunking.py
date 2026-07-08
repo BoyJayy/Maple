@@ -25,23 +25,27 @@ import httpx
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS_CSV = ROOT / "results" / "chunking_sweep" / "sweep_chunking.csv"
 
+# Must stay aligned with the index service env vars (index/config.py).
 PARAM_KEYS = (
     "MAX_CHUNK_CHARS",
     "OVERLAP_MESSAGE_COUNT",
-    "OVERLAP_CONTEXT_CHARS",
     "MAX_TIME_GAP_SECONDS",
     "SPLIT_MESSAGE_CHAR_THRESHOLD",
     "SPLIT_SEGMENT_TARGET_CHARS",
 )
 
+# Mirrors index/config.py defaults so a sweep baseline equals the shipped config.
 DEFAULTS = {
-    "MAX_CHUNK_CHARS": 1800,
+    "MAX_CHUNK_CHARS": 1600,
     "OVERLAP_MESSAGE_COUNT": 2,
-    "OVERLAP_CONTEXT_CHARS": 500,
     "MAX_TIME_GAP_SECONDS": 10800,
     "SPLIT_MESSAGE_CHAR_THRESHOLD": 1200,
-    "SPLIT_SEGMENT_TARGET_CHARS": 700,
+    "SPLIT_SEGMENT_TARGET_CHARS": 650,
 }
+
+# The search container reads its collection name at startup, so ingest must
+# target the same collection the running stack uses.
+COLLECTION = os.getenv("QDRANT_COLLECTION_NAME", "messages")
 
 
 def shell(
@@ -99,7 +103,7 @@ def run_ingest(data_path: str) -> str:
         "RESET_COLLECTION": "1",
         "INDEX_URL": "http://localhost:8001",
         "QDRANT_URL": "http://localhost:6333",
-        "QDRANT_COLLECTION_NAME": "evaluation",
+        "QDRANT_COLLECTION_NAME": COLLECTION,
         "BATCH_SIZE": "16",
     }
     result = shell(["python3", "eval/ingest.py"], env=env, capture=True, timeout=300)
@@ -108,7 +112,10 @@ def run_ingest(data_path: str) -> str:
 
 METRIC_RE = {
     "n": re.compile(r"^N\s*=\s*(\d+)", re.MULTILINE),
-    "row": re.compile(r"^final\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s*$", re.MULTILINE),
+    # final <recall> <ndcg> <mrr> <score>
+    "row": re.compile(r"^final\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s*$", re.MULTILINE),
+    # pre-MRR eval output: final <recall> <ndcg> <score>
+    "row_legacy": re.compile(r"^final\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s*$", re.MULTILINE),
     "legacy_recall": re.compile(r"^Recall@\d+\s*=\s*([0-9.]+)", re.MULTILINE),
     "legacy_ndcg": re.compile(r"^nDCG@\d+\s*=\s*([0-9.]+)", re.MULTILINE),
     "legacy_score": re.compile(r"^score\s*=\s*([0-9.]+)", re.MULTILINE),
@@ -128,6 +135,12 @@ def run_eval(dataset_path: str, k: int = 50) -> dict[str, Any]:
     if match := METRIC_RE["n"].search(out):
         metrics["n"] = float(match.group(1))
     if match := METRIC_RE["row"].search(out):
+        metrics["recall"] = float(match.group(1))
+        metrics["ndcg"] = float(match.group(2))
+        metrics["mrr"] = float(match.group(3))
+        metrics["score"] = float(match.group(4))
+        return metrics
+    if match := METRIC_RE["row_legacy"].search(out):
         metrics["recall"] = float(match.group(1))
         metrics["ndcg"] = float(match.group(2))
         metrics["score"] = float(match.group(3))
@@ -150,7 +163,7 @@ def parse_chunk_count(ingest_stdout: str) -> int:
 
 def append_row(row: dict[str, Any]) -> None:
     RESULTS_CSV.parent.mkdir(parents=True, exist_ok=True)
-    header = ["timestamp", *PARAM_KEYS, "chunks", "recall@50", "ndcg@50", "score", "note"]
+    header = ["timestamp", *PARAM_KEYS, "chunks", "recall@50", "ndcg@50", "mrr@50", "score", "note"]
     new_file = not RESULTS_CSV.exists()
     with RESULTS_CSV.open("a", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=header)
@@ -163,6 +176,7 @@ def append_row(row: dict[str, Any]) -> None:
                 "chunks": row.get("chunks"),
                 "recall@50": row.get("recall"),
                 "ndcg@50": row.get("ndcg"),
+                "mrr@50": row.get("mrr"),
                 "score": row.get("score"),
                 "note": row.get("note", ""),
             }
@@ -215,11 +229,11 @@ def main() -> None:
     runs: list[tuple[dict[str, int], str]] = [(make_combo(), "baseline")]
     for value in (600, 900, 1200, 1800, 2400, 3600):
         runs.append((make_combo(MAX_CHUNK_CHARS=value), f"axis:MAX_CHUNK_CHARS={value}"))
-    for overlap_messages, overlap_chars in [(0, 0), (1, 500), (3, 1000), (5, 2000)]:
+    for overlap_messages in (0, 1, 3, 5):
         runs.append(
             (
-                make_combo(OVERLAP_MESSAGE_COUNT=overlap_messages, OVERLAP_CONTEXT_CHARS=overlap_chars),
-                f"axis:OVERLAP({overlap_messages},{overlap_chars})",
+                make_combo(OVERLAP_MESSAGE_COUNT=overlap_messages),
+                f"axis:OVERLAP_MESSAGE_COUNT={overlap_messages}",
             )
         )
     for value in (3600, 7200, 10800, 86400):

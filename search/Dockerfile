@@ -7,14 +7,19 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY *.py .
 
+# Build args let `docker compose up --build` bake the models actually
+# configured at runtime instead of always baking the defaults.
+ARG DENSE_MODEL_NAME=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+ARG SPARSE_MODEL_NAME=Qdrant/bm25
+
 ENV HOST=0.0.0.0
 ENV PORT=8000
 ENV QDRANT_COLLECTION_NAME=messages
 ENV QDRANT_DENSE_VECTOR_NAME=dense
 ENV QDRANT_SPARSE_VECTOR_NAME=sparse
-ENV DENSE_MODEL_NAME=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+ENV DENSE_MODEL_NAME=$DENSE_MODEL_NAME
 ENV DENSE_VECTOR_SIZE=384
-ENV SPARSE_MODEL_NAME=Qdrant/bm25
+ENV SPARSE_MODEL_NAME=$SPARSE_MODEL_NAME
 ENV FASTEMBED_CACHE_PATH=/models/fastembed
 ENV HF_HOME=/models/huggingface
 

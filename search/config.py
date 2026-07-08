@@ -21,15 +21,13 @@ SPARSE_MODEL_NAME = os.getenv("SPARSE_MODEL_NAME", "Qdrant/bm25")
 SPARSE_MODEL_LANGUAGE = os.getenv("SPARSE_MODEL_LANGUAGE", "russian")
 
 
-def default_dense_prefixes(model_name: str) -> tuple[str, str]:
-    if "e5" in model_name.lower():
-        return "query: ", "passage: "
-    return "", ""
+def default_dense_query_prefix(model_name: str) -> str:
+    # E5 models expect "query: " on queries; the matching "passage: " document
+    # prefix lives in eval/ingest.py, which is the only place documents are embedded.
+    return "query: " if "e5" in model_name.lower() else ""
 
 
-_DEFAULT_QUERY_PREFIX, _DEFAULT_DOCUMENT_PREFIX = default_dense_prefixes(DENSE_MODEL_NAME)
-DENSE_QUERY_PREFIX = os.getenv("DENSE_QUERY_PREFIX", _DEFAULT_QUERY_PREFIX)
-DENSE_DOCUMENT_PREFIX = os.getenv("DENSE_DOCUMENT_PREFIX", _DEFAULT_DOCUMENT_PREFIX)
+DENSE_QUERY_PREFIX = os.getenv("DENSE_QUERY_PREFIX", default_dense_query_prefix(DENSE_MODEL_NAME))
 
 FUSION_MODE = os.getenv("FUSION_MODE", "dbsf")
 DENSE_PREFETCH_K = int(os.getenv("DENSE_PREFETCH_K", "40"))

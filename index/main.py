@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from chunking import build_chunks
 from config import HOST, PORT, UVICORN_WORKERS, logger
-from schemas import IndexAPIRequest, IndexAPIResponse, SparseEmbeddingRequest
+from schemas import IndexAPIRequest, IndexAPIResponse, SparseEmbeddingRequest, SparseEmbeddingResponse
 from sparse import embed_sparse_texts, get_sparse_model
 
 
@@ -45,7 +45,7 @@ def index(payload: IndexAPIRequest) -> IndexAPIResponse:
     )
 
 
-@app.post("/sparse_embedding")
+@app.post("/sparse_embedding", response_model=SparseEmbeddingResponse)
 async def sparse_embedding(payload: SparseEmbeddingRequest) -> dict[str, Any]:
     vectors = await asyncio.to_thread(embed_sparse_texts, payload.texts)
     return {"vectors": vectors}

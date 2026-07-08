@@ -50,7 +50,7 @@ def main() -> int:
     dataset_path = Path(sys.argv[1]) if len(sys.argv) > 1 else REPO_ROOT / "data" / "Dataset_main.json"
     chat, messages = load_dataset(dataset_path)
 
-    normalized_messages = [normalize_message(message, is_overlap=False) for message in messages]
+    normalized_messages = [normalize_message(message) for message in messages]
     kept_messages = [message for message in normalized_messages if is_message_searchable(message)]
     chunks = build_chunks(chat, [], messages)
 

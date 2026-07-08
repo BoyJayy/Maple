@@ -311,20 +311,24 @@ jobs:
           THREAD_ID: ${{ steps.build.outputs.thread_id }}
           TEXT: ${{ steps.build.outputs.text }}
         run: |
-          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ] || [ -z "$TEXT" ]; then
-            echo "Telegram secrets or text are missing"
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "Telegram secrets are not configured (fork PR?), skipping notification"
+            exit 0
+          fi
+          if [ -z "$TEXT" ]; then
+            echo "Notification text is empty"
             exit 1
           fi
 
           if [ -n "$THREAD_ID" ]; then
-            curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            curl -sS --fail-with-body -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
               --data-urlencode "chat_id=${CHAT_ID}" \
               --data-urlencode "message_thread_id=${THREAD_ID}" \
               --data-urlencode "text=${TEXT}" \
               --data-urlencode "parse_mode=HTML" \
               --data-urlencode "disable_web_page_preview=true"
           else
-            curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+            curl -sS --fail-with-body -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
               --data-urlencode "chat_id=${CHAT_ID}" \
               --data-urlencode "text=${TEXT}" \
               --data-urlencode "parse_mode=HTML" \

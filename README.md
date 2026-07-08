@@ -30,6 +30,7 @@ The current version is local-first:
 - [docs/index_service.md](docs/index_service.md) — Index Service
 - [docs/search_service.md](docs/search_service.md) — Search Service
 - [docs/local_development.md](docs/local_development.md) — local run, evaluation and troubleshooting
+- [CHANGELOG.md](CHANGELOG.md) — recent changes and migration notes
 
 ## Requirements
 
