@@ -1,7 +1,9 @@
 import asyncio
 import re
+import time
+from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any
+from typing import Any, Callable
 
 from fastembed import SparseTextEmbedding, TextEmbedding
 from qdrant_client import AsyncQdrantClient, models
@@ -14,6 +16,7 @@ from config import (
     DENSE_QUERY_PREFIX,
     FINAL_MESSAGE_LIMIT,
     FUSION_MODE,
+    POINT_RESCORE_ENABLED,
     QDRANT_COLLECTION_NAME,
     QDRANT_DENSE_VECTOR_NAME,
     QDRANT_SPARSE_VECTOR_NAME,
@@ -30,7 +33,14 @@ from config import (
     SPARSE_MODEL_LANGUAGE,
     SPARSE_MODEL_NAME,
     SPARSE_PREFETCH_K,
+    TIME_FILTER_BOUNDS_CACHE_SECONDS,
+    TIME_FILTER_BOUNDS_GUARD_ENABLED,
+    TIME_FILTER_BOUNDS_RETRY_SECONDS,
     TIME_FILTER_ENABLED,
+    TIME_FILTER_MODE,
+    TIME_FILTER_SOFT_DENSE_QUERIES,
+    TIME_FILTER_SOFT_PREFETCH_K,
+    TIME_FILTER_SOFT_SPARSE_QUERIES,
     logger,
 )
 from querying import (
@@ -44,6 +54,93 @@ from schemas import SearchAPIRequest, SparseVector
 
 
 MESSAGE_BLOCK_SPLIT_RE = re.compile(r"\n\n(?=\[\d{4}-\d{2}-\d{2} )")
+
+
+@dataclass
+class CollectionTimeBoundsCache:
+    """TTL cache for the indexed collection's global message-time envelope.
+
+    The cache is deliberately lazy because the search service can start before
+    a manual ingest. Bounds failures only disable the optimization; the normal
+    filtered search and its compatibility fallback remain available.
+    """
+
+    qdrant_client: AsyncQdrantClient
+    success_ttl_seconds: float = TIME_FILTER_BOUNDS_CACHE_SECONDS
+    retry_ttl_seconds: float = TIME_FILTER_BOUNDS_RETRY_SECONDS
+    clock: Callable[[], float] = time.monotonic
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _expires_at: float = field(default=0.0, init=False)
+    _loaded: bool = field(default=False, init=False)
+    _bounds: tuple[int, int] | None = field(default=None, init=False)
+
+    def invalidate(self) -> None:
+        self._loaded = False
+        self._expires_at = 0.0
+        self._bounds = None
+
+    async def get(self) -> tuple[int, int] | None:
+        now = self.clock()
+        if self._loaded and now < self._expires_at:
+            return self._bounds
+
+        async with self._lock:
+            now = self.clock()
+            if self._loaded and now < self._expires_at:
+                return self._bounds
+
+            bounds = await self._load()
+            ttl = self.success_ttl_seconds if bounds is not None else self.retry_ttl_seconds
+            self._bounds = bounds
+            self._loaded = True
+            # Start the TTL after the remote lookup. A slow failure must not
+            # expire immediately and make each lock waiter repeat it.
+            self._expires_at = self.clock() + max(0.0, ttl)
+            return bounds
+
+    async def _load(self) -> tuple[int, int] | None:
+        try:
+            (earliest, _), (latest, _) = await asyncio.gather(
+                self.qdrant_client.scroll(
+                    collection_name=QDRANT_COLLECTION_NAME,
+                    limit=1,
+                    order_by=models.OrderBy(
+                        key="metadata.start",
+                        direction=models.Direction.ASC,
+                    ),
+                    with_payload=["metadata.start"],
+                    with_vectors=False,
+                ),
+                self.qdrant_client.scroll(
+                    collection_name=QDRANT_COLLECTION_NAME,
+                    limit=1,
+                    order_by=models.OrderBy(
+                        key="metadata.end",
+                        direction=models.Direction.DESC,
+                    ),
+                    with_payload=["metadata.end"],
+                    with_vectors=False,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Unable to read collection time bounds: %s", exc)
+            return None
+
+        min_start = _integer_metadata_value(earliest, "start")
+        max_end = _integer_metadata_value(latest, "end")
+        if min_start is None or max_end is None or min_start > max_end:
+            logger.warning("Collection time bounds are missing or malformed")
+            return None
+        return min_start, max_end
+
+
+def _integer_metadata_value(records: list[Any], key: str) -> int | None:
+    if not records:
+        return None
+    value = get_metadata(records[0]).get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 @lru_cache(maxsize=1)
@@ -109,6 +206,42 @@ def build_time_filter(ctx: SearchContext) -> models.Filter | None:
     )
 
 
+def time_range_overlaps_collection(
+    query_range: tuple[int, int],
+    collection_bounds: tuple[int, int],
+) -> bool:
+    query_start, query_end = query_range
+    collection_start, collection_end = collection_bounds
+    return query_end >= collection_start and query_start <= collection_end
+
+
+async def resolve_time_filter(
+    ctx: SearchContext,
+    time_bounds_cache: CollectionTimeBoundsCache | None,
+) -> models.Filter | None:
+    query_filter = build_time_filter(ctx)
+    if (
+        query_filter is None
+        or not TIME_FILTER_BOUNDS_GUARD_ENABLED
+        or time_bounds_cache is None
+        or ctx.time_range is None
+    ):
+        return query_filter
+
+    collection_bounds = await time_bounds_cache.get()
+    if collection_bounds is not None and not time_range_overlaps_collection(
+        ctx.time_range,
+        collection_bounds,
+    ):
+        logger.debug(
+            "Skipping disjoint time filter query_range=%s collection_bounds=%s",
+            ctx.time_range,
+            collection_bounds,
+        )
+        return None
+    return query_filter
+
+
 async def qdrant_search(
     qdrant_client: AsyncQdrantClient,
     *,
@@ -117,28 +250,11 @@ async def qdrant_search(
     fusion: str,
     query_filter: models.Filter | None = None,
 ) -> list[Any]:
-    prefetch: list[models.Prefetch] = []
-    for dense_vector in dense_vectors:
-        prefetch.append(
-            models.Prefetch(
-                query=dense_vector,
-                using=QDRANT_DENSE_VECTOR_NAME,
-                limit=DENSE_PREFETCH_K,
-                filter=query_filter,
-            )
-        )
-    for sparse_vector in sparse_vectors:
-        prefetch.append(
-            models.Prefetch(
-                query=models.SparseVector(
-                    indices=sparse_vector.indices,
-                    values=sparse_vector.values,
-                ),
-                using=QDRANT_SPARSE_VECTOR_NAME,
-                limit=SPARSE_PREFETCH_K,
-                filter=query_filter,
-            )
-        )
+    prefetch = build_prefetches(
+        dense_vectors=dense_vectors,
+        sparse_vectors=sparse_vectors,
+        query_filter=query_filter,
+    )
 
     if not prefetch:
         return []
@@ -152,6 +268,86 @@ async def qdrant_search(
         with_payload=True,
     )
     return list(response.points)
+
+
+def build_prefetches(
+    *,
+    dense_vectors: list[list[float]],
+    sparse_vectors: list[SparseVector],
+    query_filter: models.Filter | None,
+) -> list[models.Prefetch]:
+    """Build hard-filtered or soft time-boost branches.
+
+    Soft mode keeps every normal retrieval branch unfiltered and adds filtered
+    copies of the strongest dense/sparse branches. A wrong date does not remove
+    those base branches, but fusion can still change which candidates fit into
+    the final top-K.
+    """
+
+    prefetch: list[models.Prefetch] = []
+
+    if query_filter is None:
+        base_filter = None
+    elif TIME_FILTER_MODE == "hard":
+        base_filter = query_filter
+    else:
+        base_filter = None
+
+    def append_dense(
+        vectors: list[list[float]],
+        filter_: models.Filter | None,
+        *,
+        limit: int = DENSE_PREFETCH_K,
+    ) -> None:
+        for dense_vector in vectors:
+            prefetch.append(
+                models.Prefetch(
+                    query=dense_vector,
+                    using=QDRANT_DENSE_VECTOR_NAME,
+                    limit=limit,
+                    filter=filter_,
+                )
+            )
+
+    def append_sparse(
+        vectors: list[SparseVector],
+        filter_: models.Filter | None,
+        *,
+        limit: int = SPARSE_PREFETCH_K,
+    ) -> None:
+        for sparse_vector in vectors:
+            prefetch.append(
+                models.Prefetch(
+                    query=models.SparseVector(
+                        indices=sparse_vector.indices,
+                        values=sparse_vector.values,
+                    ),
+                    using=QDRANT_SPARSE_VECTOR_NAME,
+                    limit=limit,
+                    filter=filter_,
+                )
+            )
+
+    append_dense(dense_vectors, base_filter)
+    append_sparse(sparse_vectors, base_filter)
+
+    if (
+        query_filter is not None
+        and TIME_FILTER_MODE == "soft"
+        and TIME_FILTER_SOFT_PREFETCH_K > 0
+    ):
+        append_dense(
+            dense_vectors[: max(0, TIME_FILTER_SOFT_DENSE_QUERIES)],
+            query_filter,
+            limit=TIME_FILTER_SOFT_PREFETCH_K,
+        )
+        append_sparse(
+            sparse_vectors[: max(0, TIME_FILTER_SOFT_SPARSE_QUERIES)],
+            query_filter,
+            limit=TIME_FILTER_SOFT_PREFETCH_K,
+        )
+
+    return prefetch
 
 
 def get_payload(point: Any) -> dict[str, Any]:
@@ -314,6 +510,7 @@ async def run_search_pipeline(
     qdrant_client: AsyncQdrantClient,
     payload: SearchAPIRequest,
     *,
+    time_bounds_cache: CollectionTimeBoundsCache | None = None,
     collect_stages: bool = False,
     fusion: str | None = None,
     max_dense: int | None = None,
@@ -332,11 +529,11 @@ async def run_search_pipeline(
     if max_sparse is not None:
         sparse_queries = sparse_queries[: max(0, max_sparse)]
 
-    dense_vectors, sparse_vectors = await asyncio.gather(
+    dense_vectors, sparse_vectors, query_filter = await asyncio.gather(
         embed_dense(dense_queries),
         embed_sparse(sparse_queries),
+        resolve_time_filter(ctx, time_bounds_cache),
     )
-    query_filter = build_time_filter(ctx)
     points = await qdrant_search(
         qdrant_client,
         dense_vectors=dense_vectors,
@@ -344,11 +541,10 @@ async def run_search_pipeline(
         fusion=fusion or FUSION_MODE,
         query_filter=query_filter,
     )
-    if not points and query_filter is not None:
-        # The time filter is a precision optimization, not a correctness gate:
-        # question dates may refer to content rather than message time, and
-        # collections ingested before the integer start/end migration do not
-        # match Range conditions at all. Zero filtered hits -> retry unfiltered.
+    if not points and query_filter is not None and TIME_FILTER_MODE == "hard":
+        # Hard mode keeps a compatibility fallback for internal time gaps,
+        # old string metadata and dates that describe content rather than send
+        # time. Soft mode already carries unfiltered branches in the same call.
         logger.warning("Time-filtered search returned no points, retrying without time filter")
         points = await qdrant_search(
             qdrant_client,
@@ -368,7 +564,7 @@ async def run_search_pipeline(
             assemble_message_ids, ctx, points, limit=FINAL_MESSAGE_LIMIT
         )
 
-    if not skip_rescore:
+    if POINT_RESCORE_ENABLED and not skip_rescore:
         points = await asyncio.to_thread(rescore_points, ctx, points)
         if collect_stages:
             stages["rescored"] = await asyncio.to_thread(
@@ -376,11 +572,17 @@ async def run_search_pipeline(
             )
 
     if RERANK_ENABLED and not skip_rerank:
-        points = await rerank_points(ctx, points)
-        if collect_stages:
-            stages["reranked"] = await asyncio.to_thread(
-                assemble_message_ids, ctx, points, limit=FINAL_MESSAGE_LIMIT
-            )
+        try:
+            points = await rerank_points(ctx, points)
+        except Exception:
+            # Reranking is an optional quality layer. A model/runtime failure
+            # must not turn an otherwise healthy local search into HTTP 500.
+            logger.exception("Reranker failed; returning fused results")
+        else:
+            if collect_stages:
+                stages["reranked"] = await asyncio.to_thread(
+                    assemble_message_ids, ctx, points, limit=FINAL_MESSAGE_LIMIT
+                )
 
     final_message_ids = await asyncio.to_thread(
         assemble_message_ids, ctx, points, limit=FINAL_MESSAGE_LIMIT

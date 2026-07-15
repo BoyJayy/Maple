@@ -143,5 +143,22 @@ def test_build_search_context_limits_and_stems():
     assert "1.18" in ctx.exact_terms
 
 
+def test_whitespace_search_text_falls_back_to_question_text():
+    ctx = build_search_context(Question(text="нормальный вопрос", search_text="   \n"))
+    assert ctx.primary_query == "нормальный вопрос"
+    assert ctx.dense_queries[0] == "нормальный вопрос"
+
+
+def test_explicit_date_range_takes_priority_over_date_mentions():
+    question = Question(
+        text="что было",
+        date_range=DateRange.model_validate({"from": "2023-05-12", "to": "2023-05-12"}),
+        date_mentions=["в течение 2020 года"],
+    )
+    start, end = extract_time_range(question)
+    assert start >= 1683849600 - TIME_FILTER_MARGIN_SECONDS
+    assert end <= 1683935999 + TIME_FILTER_MARGIN_SECONDS
+
+
 def test_dedupe_message_ids_keeps_order_and_limit():
     assert dedupe_message_ids(["a", "b", "a", "c", "d"], limit=3) == ["a", "b", "c"]

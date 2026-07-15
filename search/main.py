@@ -18,16 +18,36 @@ from config import (
     RERANK_ENABLED,
     logger,
 )
-from pipeline import get_dense_model, get_reranker, get_sparse_model, run_search_pipeline
+from pipeline import (
+    CollectionTimeBoundsCache,
+    get_dense_model,
+    get_reranker,
+    get_sparse_model,
+    run_search_pipeline,
+)
 from schemas import SearchAPIItem, SearchAPIRequest, SearchAPIResponse
 
 
-async def warmup_models() -> None:
-    warmups = [asyncio.to_thread(get_dense_model), asyncio.to_thread(get_sparse_model)]
-    if RERANK_ENABLED:
-        warmups.append(asyncio.to_thread(get_reranker))
-    await asyncio.gather(*warmups)
-    logger.info("Models warmed up")
+async def warmup_models() -> bool:
+    await asyncio.gather(
+        asyncio.to_thread(get_dense_model),
+        asyncio.to_thread(get_sparse_model),
+    )
+    if not RERANK_ENABLED:
+        logger.info("Models warmed up")
+        return False
+
+    try:
+        await asyncio.to_thread(get_reranker)
+    except Exception:
+        # Dense+sparse retrieval remains fully usable when the optional model
+        # cannot be downloaded or initialized. Keep it disabled until restart
+        # instead of retrying the expensive load on every request.
+        logger.exception("Reranker warmup failed; continuing without reranking")
+        return False
+
+    logger.info("Models and reranker warmed up")
+    return True
 
 
 @asynccontextmanager
@@ -36,7 +56,8 @@ async def lifespan(app: FastAPI):
         url=QDRANT_URL,
         api_key=QDRANT_API_KEY,
     )
-    await warmup_models()
+    app.state.time_bounds_cache = CollectionTimeBoundsCache(app.state.qdrant)
+    app.state.reranker_available = await warmup_models()
     try:
         yield
     finally:
@@ -85,6 +106,8 @@ async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
         final_message_ids, _ = await run_search_pipeline(
             app.state.qdrant,
             payload,
+            time_bounds_cache=app.state.time_bounds_cache,
+            skip_rerank=not app.state.reranker_available,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -109,8 +132,9 @@ async def search_debug(
         final_message_ids, stages = await run_search_pipeline(
             app.state.qdrant,
             payload,
+            time_bounds_cache=app.state.time_bounds_cache,
             skip_rescore=no_rescore,
-            skip_rerank=no_rerank,
+            skip_rerank=no_rerank or not app.state.reranker_available,
             collect_stages=True,
             fusion=fusion,
             max_dense=max_dense,

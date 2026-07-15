@@ -152,7 +152,9 @@ Response:
 
 ### GET /ready
 
-Returns `200 {"status": "ok"}` when Qdrant is reachable and the collection exists, otherwise `503` with a reason.
+Returns `200 {"status": "ok"}` when Qdrant is reachable, the collection
+exists, and its dense vector size matches `DENSE_VECTOR_SIZE`; otherwise it
+returns `503` with a reason.
 
 ### POST /search
 
@@ -210,7 +212,7 @@ Useful query parameters:
 - `no_rescore=true`
 - `no_rerank=true`
 
-Typical response (the `reranked` stage appears only with `RERANK_ENABLED=1`):
+Typical response:
 
 ```json
 {
@@ -222,6 +224,10 @@ Typical response (the `reranked` stage appears only with `RERANK_ENABLED=1`):
   }
 }
 ```
+
+The `rescored` stage appears only when `POINT_RESCORE_ENABLED=1` and point
+rescoring is not skipped. The `reranked` stage appears only when
+`RERANK_ENABLED=1` and reranking succeeds.
 
 ## Environment variables
 
@@ -263,10 +269,16 @@ Typical response (the `reranked` stage appears only with `RERANK_ENABLED=1`):
 - `MAX_DENSE_QUERIES`
 - `MAX_SPARSE_QUERIES`
 - `FINAL_MESSAGE_LIMIT`
+- `POINT_RESCORE_ENABLED`
 - `RESCORE_RANK_BONUS_MAX`, `RESCORE_RANK_BONUS_STEP`
 - `RESCORE_MESSAGE_HIT_WEIGHT`, `RESCORE_CONTEXT_HIT_WEIGHT`, `RESCORE_METADATA_HIT_WEIGHT`
 - `ASSEMBLE_BLOCK_HIT_WEIGHT`, `ASSEMBLE_BLOCK_INDEX_PENALTY`
 - `TIME_FILTER_ENABLED`, `TIME_FILTER_MARGIN_SECONDS`
+- `TIME_FILTER_MODE`
+- `TIME_FILTER_BOUNDS_GUARD_ENABLED`
+- `TIME_FILTER_BOUNDS_CACHE_SECONDS`, `TIME_FILTER_BOUNDS_RETRY_SECONDS`
+- `TIME_FILTER_SOFT_DENSE_QUERIES`, `TIME_FILTER_SOFT_SPARSE_QUERIES`
+- `TIME_FILTER_SOFT_PREFETCH_K`
 - `RERANK_ENABLED`, `RERANK_MODEL_NAME`, `RERANK_TOP_K`, `RERANK_MAX_DOC_CHARS`
 
 ## Contract stability
