@@ -17,7 +17,9 @@ chat payload
 question
   -> search
   -> dense and sparse retrieval
-  -> fusion + rescoring
+  -> fusion
+  -> optional point-level rescore
+  -> message-level assembly
   -> message_ids
 ```
 
@@ -45,7 +47,8 @@ Responsibilities:
 - compute local dense and sparse embeddings;
 - query Qdrant with both retrieval modes;
 - merge results with fusion;
-- apply lightweight local rescoring;
+- optionally apply point-level local rescoring;
+- score message blocks during final assembly;
 - return final `message_ids`.
 
 ### Qdrant
@@ -54,7 +57,11 @@ Qdrant stores one point per chunk. Each point contains:
 - a dense vector;
 - a sparse vector;
 - `page_content`;
-- metadata with `message_ids`, participants, mentions and time bounds.
+- metadata with `message_ids`, per-message `message_blocks`, participants,
+  mentions and integer time bounds (`start` / `end`).
+
+Payload indexes: `metadata.chat_id` (keyword), `metadata.start` and
+`metadata.end` (integer, used by the search-time date filter).
 
 ## Content fields
 
@@ -80,8 +87,13 @@ Token preserving text used for sparse embeddings and exact term matching.
 The search pipeline is hybrid:
 - dense retrieval finds semantic matches;
 - sparse retrieval finds exact terms, names, links and identifiers;
+- hard time filtering narrows candidates only when the requested range can
+  overlap the cached collection envelope; a soft fusion mode remains optional;
 - fusion combines both result sets;
-- rescoring gives a small boost to points with stronger exact matches in the message body or metadata.
+- optional point rescoring (off by default) can boost chunks with stronger
+  morphology-aware exact matches in the message body or metadata;
+- message-block scoring remains active during final assembly;
+- an optional local cross-encoder reranker reorders the top candidates.
 
 ## Local first setup
 
@@ -89,9 +101,10 @@ The project does not depend on external APIs.
 
 Models used by default:
 - dense: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
-- sparse: `Qdrant/bm25`
+- sparse: `Qdrant/bm25` (`language=russian`)
+- reranker (optional, off by default): `jinaai/jina-reranker-v2-base-multilingual`
 
-Both are loaded locally through `fastembed`.
+All are loaded locally through `fastembed`.
 
 ## Repository structure
 
@@ -109,7 +122,7 @@ Both are loaded locally through `fastembed`.
 - `config.py` — runtime settings
 - `schemas.py` — API models
 - `querying.py` — query preparation and exact term extraction
-- `pipeline.py` — embeddings, Qdrant retrieval, fusion and rescoring
+- `pipeline.py` — embeddings, Qdrant retrieval, fusion, optional rescoring and assembly
 
 ### eval
 

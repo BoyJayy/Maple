@@ -39,11 +39,17 @@ class IndexAPIRequest(BaseModel):
     data: ChatData
 
 
+class MessageBlock(BaseModel):
+    message_id: str
+    text: str
+
+
 class IndexAPIItem(BaseModel):
     page_content: str
     dense_content: str
     sparse_content: str
     message_ids: list[str]
+    message_blocks: list[MessageBlock] = []
 
 
 class IndexAPIResponse(BaseModel):

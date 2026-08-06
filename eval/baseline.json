@@ -1,0 +1,20 @@
+{
+  "dataset": "data/Dataset_main_questions.jsonl",
+  "k": 50,
+  "n": 160,
+  "note": "final profile via Docker /search: dbsf, hard time bounds guard, point rescore off, MiniLM",
+  "stages": {
+    "retrieval": {
+      "recall": 1.0,
+      "ndcg": 0.779886528417531,
+      "mrr": 0.7098160866910866,
+      "score": 0.9559773056835063
+    },
+    "final": {
+      "recall": 1.0,
+      "ndcg": 0.779886528417531,
+      "mrr": 0.7098160866910866,
+      "score": 0.9559773056835063
+    }
+  }
+}

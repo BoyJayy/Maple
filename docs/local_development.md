@@ -21,13 +21,28 @@ curl http://localhost:8002/health
 curl http://localhost:6333/collections
 ```
 
+Readiness checks (models warmed up, Qdrant collection exists; search also
+validates its dense vector size):
+
+```bash
+curl http://localhost:8001/ready
+curl http://localhost:8002/ready
+```
+
+Qdrant data is persisted in the `qdrant_storage` Docker volume, so points
+survive container restarts. Remove it with `docker compose down -v` for a
+clean slate.
+
 ## 2. Prepare Python environment for evaluation
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r eval/requirements.txt
+pip install -r requirements-dev.txt
 ```
+
+`requirements-dev.txt` includes the eval dependencies plus `pytest` and the
+libraries needed to run service unit tests locally.
 
 ## 3. Ingest data into Qdrant
 
@@ -59,6 +74,17 @@ If you want to recreate the collection:
 RESET_COLLECTION=1 python3 eval/ingest.py
 ```
 
+Reingest is required after changing `DENSE_MODEL_NAME`, `DENSE_VECTOR_SIZE`
+or `SPARSE_MODEL_LANGUAGE` — vectors and payload schema must match the new
+settings (`RESET_COLLECTION=1` is the easiest way).
+
+Synthetic JSONL datasets are ingested as one hand-made chunk per answer by
+default. To route them through the real `/index` chunking pipeline instead:
+
+```bash
+SYNTHETIC_VIA_INDEX=1 DATA_PATH=data/Dataset_main_questions.jsonl python3 eval/ingest.py
+```
+
 ## 4. Run search evaluation
 
 Main dataset:
@@ -78,6 +104,39 @@ Sweep dataset:
 ```bash
 python3 eval/run.py --dataset data/Dataset_sweep_questions.jsonl --k 50
 ```
+
+The report includes Recall@K, nDCG@K and MRR@K per stage. Additional knobs:
+
+- `--ks 10,50` reports several cutoffs at once (`--k` keeps the legacy
+  single-cutoff output that `scripts/sweep_chunking.py` parses);
+- when dataset entries carry a `category` field, the final stage is
+  additionally broken down per category;
+- with 10+ questions the final stage gets 95% bootstrap confidence
+  intervals for Recall and nDCG;
+- entries with empty `answer.message_ids` (negative questions) are counted
+  and excluded from ranking metrics.
+
+Baselines for regression checks:
+
+```bash
+# freeze current results
+python3 eval/run.py --dataset data/Dataset_main_questions.jsonl --k 50 --save-baseline eval/baseline.json
+
+# later runs automatically compare against eval/baseline.json if it exists,
+# or pass an explicit file:
+python3 eval/run.py --dataset data/Dataset_main_questions.jsonl --k 50 --baseline eval/baseline.json
+```
+
+## 4a. Run unit tests
+
+```bash
+sh scripts/run_tests.sh
+```
+
+The script runs three pytest suites (`tests/index_service`,
+`tests/search_service`, `tests/eval_service`) in separate processes because
+`index/` and `search/` both have top-level `config.py` / `schemas.py`
+modules and cannot be imported into one interpreter.
 
 ## 5. Manual API checks
 
@@ -155,6 +214,35 @@ Useful search variables:
 - `RETRIEVE_K`
 - `MAX_DENSE_QUERIES`
 - `MAX_SPARSE_QUERIES`
+- `POINT_RESCORE_ENABLED=0|1` — optional point-level pass, default `0`
+- `RESCORE_*` — weights used only when point rescoring is enabled
+- `ASSEMBLE_*` — final message-block ordering weights
+- `TIME_FILTER_ENABLED=0|1`
+- `TIME_FILTER_MODE=hard|soft` — default `hard`
+- `TIME_FILTER_BOUNDS_GUARD_ENABLED=0|1`
+- `TIME_FILTER_BOUNDS_CACHE_SECONDS` — default `60`
+- `TIME_FILTER_BOUNDS_RETRY_SECONDS` — default `5`
+- `TIME_FILTER_SOFT_DENSE_QUERIES`, `TIME_FILTER_SOFT_SPARSE_QUERIES`
+- `TIME_FILTER_SOFT_PREFETCH_K`
+- `RERANK_ENABLED=1` — local cross-encoder rerank (slower, better ordering)
+
+Switching to a stronger dense model (needs `RESET_COLLECTION=1` reingest):
+
+```bash
+DENSE_MODEL_NAME=intfloat/multilingual-e5-large \
+DENSE_VECTOR_SIZE=1024 \
+docker compose up --build
+# then: DENSE_MODEL_NAME=intfloat/multilingual-e5-large DENSE_VECTOR_SIZE=1024 \
+#       RESET_COLLECTION=1 python3 eval/ingest.py
+```
+E5 `query:` / `passage:` prefixes are applied automatically. With `--build`
+the configured model is baked into the image (compose passes it as a build
+arg); without a rebuild the model is downloaded once at startup and cached in
+the `search_models` volume. `GET /ready` reports a 503 until the collection
+is reingested with the matching vector size.
+
+`NO_RESCORE=1` / `NO_RERANK=1` work with plain `eval/run.py` runs too — the
+toggles automatically route requests through `/_debug/search`.
 
 Useful index variables:
 - `MAX_CHUNK_CHARS`
@@ -193,6 +281,32 @@ Qdrant retrieval A/B checks:
 ```bash
 python3 scripts/ab_qdrant.py --help
 ```
+
+Build an eval corpus from real Russian dialogues (HF `Den4ikAI/russian_dialogues_2`, MIT):
+
+```bash
+python3 scripts/convert_hf_dialogues.py --count 300
+```
+
+The script downloads dialogues through the free HF datasets-server API
+(rate-limit aware), buckets them by topic so the corpus contains thematic
+distractors, assigns synthetic senders, @mentions, occasional interleaved
+sessions with threads, and deterministic timestamps (so date-anchored
+questions have verifiable ground truth). Output: `data/Dataset_dialogues.json`
+plus `data/Dataset_dialogues_manifest.json` for authoring questions.
+
+The question set `data/Dataset_dialogues_questions.jsonl` (144 questions)
+is tagged by category: `semantic`, `exact`, `date`, `participant`,
+`multihop` and `negative` (no answer in corpus; excluded from ranking
+metrics). Validate any question set against its corpus with:
+
+```bash
+python3 scripts/validate_questions.py \
+  --corpus data/Dataset_dialogues.json \
+  --questions data/Dataset_dialogues_questions.jsonl
+```
+
+Reference results are in `eval/baseline_dialogues.json`.
 
 ## 9. Troubleshooting
 

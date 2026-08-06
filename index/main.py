@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from typing import Any
 import asyncio
 
@@ -7,11 +8,18 @@ from fastapi.responses import JSONResponse
 
 from chunking import build_chunks
 from config import HOST, PORT, UVICORN_WORKERS, logger
-from schemas import IndexAPIRequest, IndexAPIResponse, SparseEmbeddingRequest
-from sparse import embed_sparse_texts
+from schemas import IndexAPIRequest, IndexAPIResponse, SparseEmbeddingRequest, SparseEmbeddingResponse
+from sparse import embed_sparse_texts, get_sparse_model
 
 
-app = FastAPI(title="Index Service", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await asyncio.to_thread(get_sparse_model)
+    logger.info("Sparse model warmed up")
+    yield
+
+
+app = FastAPI(title="Index Service", version="0.1.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -19,8 +27,15 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/ready")
+async def ready() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.post("/index", response_model=IndexAPIResponse)
-async def index(payload: IndexAPIRequest) -> IndexAPIResponse:
+def index(payload: IndexAPIRequest) -> IndexAPIResponse:
+    # Sync handler: FastAPI runs it in a worker thread, so CPU-bound
+    # chunking of large payloads does not block the event loop.
     return IndexAPIResponse(
         results=build_chunks(
             payload.data.chat,
@@ -30,7 +45,7 @@ async def index(payload: IndexAPIRequest) -> IndexAPIResponse:
     )
 
 
-@app.post("/sparse_embedding")
+@app.post("/sparse_embedding", response_model=SparseEmbeddingResponse)
 async def sparse_embedding(payload: SparseEmbeddingRequest) -> dict[str, Any]:
     vectors = await asyncio.to_thread(embed_sparse_texts, payload.texts)
     return {"vectors": vectors}

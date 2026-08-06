@@ -8,7 +8,7 @@ The repository contains two services:
 
 The current version is local-first:
 - no external embedding API;
-- no external reranker;
+- no external reranker (an optional local cross-encoder can be enabled);
 - all models run inside the project with `fastembed`;
 - the default setup works on `localhost`.
 
@@ -18,6 +18,8 @@ The current version is local-first:
 - `search/` — Search Service
 - `eval/` — local ingestion and offline evaluation
 - `scripts/` — helper utilities
+- `tests/` — unit tests for chunking, querying, rescoring and metrics
+- `benchmarks/` — reproducible branch/final comparisons and raw results
 - `data/` — sample datasets and payloads
 - `docs/` — project documentation
 - `docker-compose.yml` — local stack with Qdrant, index and search
@@ -29,6 +31,8 @@ The current version is local-first:
 - [docs/index_service.md](docs/index_service.md) — Index Service
 - [docs/search_service.md](docs/search_service.md) — Search Service
 - [docs/local_development.md](docs/local_development.md) — local run, evaluation and troubleshooting
+- [benchmarks/REPORT.md](benchmarks/REPORT.md) — `main`/`fable`/final benchmark report
+- [CHANGELOG.md](CHANGELOG.md) — recent changes and migration notes
 
 ## Requirements
 
@@ -56,20 +60,35 @@ curl http://localhost:8002/health
 curl http://localhost:6333/collections
 ```
 
+Readiness checks (models warmed up, collection exists; search also validates
+the configured dense vector size):
+
+```bash
+curl http://localhost:8001/ready
+curl http://localhost:8002/ready
+```
+
 Index the sample dataset into Qdrant:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r eval/requirements.txt
+pip install -r requirements-dev.txt
 python3 eval/ingest.py
 ```
 
-Run offline evaluation:
+Run offline evaluation (reports Recall@K, nDCG@K and MRR@K):
 
 ```bash
 python3 eval/run.py --dataset data/Dataset_main_questions.jsonl --k 50
 python3 eval/run.py --dataset data/Dataset_main_questions.jsonl --k 50 --stages
+python3 eval/run.py --dataset data/Dataset_main_questions.jsonl --k 50 --save-baseline eval/baseline.json
+```
+
+Run unit tests:
+
+```bash
+sh scripts/run_tests.sh
 ```
 
 ## How to use the services
@@ -112,17 +131,30 @@ curl -X POST "http://localhost:8002/_debug/search?fusion=dbsf" \
 
 The default setup is enough for local work, but the main settings can be overridden with environment variables.
 
+The final balanced profile uses DBSF hybrid retrieval, keeps point-level
+rescoring and the cross-encoder reranker disabled by default, and skips the
+hard time filter whenever cached collection bounds prove that the requested
+range is disjoint.
+
 Important variables:
 - `QDRANT_COLLECTION_NAME`
 - `DENSE_MODEL_NAME`
 - `DENSE_VECTOR_SIZE`
 - `SPARSE_MODEL_NAME`
+- `SPARSE_MODEL_LANGUAGE`
 - `FUSION_MODE`
 - `DENSE_PREFETCH_K`
 - `SPARSE_PREFETCH_K`
 - `RETRIEVE_K`
 - `MAX_DENSE_QUERIES`
 - `MAX_SPARSE_QUERIES`
+- `POINT_RESCORE_ENABLED`
+- `TIME_FILTER_ENABLED`, `TIME_FILTER_MODE`
+- `TIME_FILTER_BOUNDS_GUARD_ENABLED`
+- `TIME_FILTER_BOUNDS_CACHE_SECONDS`, `TIME_FILTER_BOUNDS_RETRY_SECONDS`
+- `TIME_FILTER_SOFT_DENSE_QUERIES`, `TIME_FILTER_SOFT_SPARSE_QUERIES`
+- `TIME_FILTER_SOFT_PREFETCH_K`
+- `RERANK_ENABLED`, `RERANK_MODEL_NAME`, `RERANK_TOP_K`
 
 Chunking settings:
 - `MAX_CHUNK_CHARS`

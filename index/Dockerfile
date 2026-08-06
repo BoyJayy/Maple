@@ -7,14 +7,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY *.py .
 
+ARG SPARSE_MODEL_NAME=Qdrant/bm25
+
 ENV HOST=0.0.0.0
 ENV PORT=8000
-ENV CHUNK_SIZE=10
+ENV SPARSE_MODEL_NAME=$SPARSE_MODEL_NAME
 ENV FASTEMBED_CACHE_PATH=/models/fastembed
 ENV HF_HOME=/models/huggingface
 
 RUN mkdir -p /models/fastembed /models/huggingface
-RUN python -c "from fastembed import SparseTextEmbedding; SparseTextEmbedding(model_name='Qdrant/bm25')"
+RUN python -c "import os; from fastembed import SparseTextEmbedding; SparseTextEmbedding(model_name=os.environ['SPARSE_MODEL_NAME'])"
 
 EXPOSE 8000
 

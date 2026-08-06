@@ -37,7 +37,9 @@ SHORT_ACK_MESSAGES = {
     "thx",
 }
 
-SPARSE_MODEL_NAME = "Qdrant/bm25"
+SPARSE_MODEL_NAME = os.getenv("SPARSE_MODEL_NAME", "Qdrant/bm25")
+# BM25 stemmer/stopwords language; the search service must use the same value.
+SPARSE_MODEL_LANGUAGE = os.getenv("SPARSE_MODEL_LANGUAGE", "russian")
 FASTEMBED_CACHE_PATH = "/models/fastembed"
 UVICORN_WORKERS = int(os.getenv("UVICORN_WORKERS", "2"))
 

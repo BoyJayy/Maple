@@ -24,6 +24,16 @@ DATA_PATH = Path(os.getenv("DATA_PATH", "data/Dataset_main.json"))
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
 DELETE_EXISTING_CHAT_POINTS = os.getenv("DELETE_EXISTING_CHAT_POINTS", "1") == "1"
 RESET_COLLECTION = os.getenv("RESET_COLLECTION", "0") == "1"
+# Route the synthetic JSONL corpus through the index service so chunking is
+# exercised too, instead of writing one hand-made chunk per answer.
+SYNTHETIC_VIA_INDEX = os.getenv("SYNTHETIC_VIA_INDEX", "0") == "1"
+
+
+def default_document_prefix(model_name: str) -> str:
+    return "passage: " if "e5" in model_name.lower() else ""
+
+
+DENSE_DOCUMENT_PREFIX = os.getenv("DENSE_DOCUMENT_PREFIX", default_document_prefix(DENSE_MODEL_NAME))
 
 _CHUNK_ID_NAMESPACE = uuid.UUID("6f8c3a1e-0000-0000-0000-000000000001")
 
@@ -39,18 +49,26 @@ def stable_chunk_id(chat_id: str, chunk: dict) -> str:
     return str(uuid.uuid5(_CHUNK_ID_NAMESPACE, key))
 
 
+def ensure_payload_indexes(qc: QdrantClient, name: str) -> None:
+    # Keep in sync with scripts/qdrant_init.sh.
+    qc.create_payload_index(name, field_name="metadata.chat_id", field_schema=models.PayloadSchemaType.KEYWORD)
+    qc.create_payload_index(name, field_name="metadata.start", field_schema=models.PayloadSchemaType.INTEGER)
+    qc.create_payload_index(name, field_name="metadata.end", field_schema=models.PayloadSchemaType.INTEGER)
+
+
 def ensure_collection(qc: QdrantClient, name: str, dense_size: int) -> None:
-    if qc.collection_exists(name):
-        return
-    qc.create_collection(
-        collection_name=name,
-        vectors_config={
-            "dense": models.VectorParams(size=dense_size, distance=models.Distance.COSINE),
-        },
-        sparse_vectors_config={
-            "sparse": models.SparseVectorParams(modifier=models.Modifier.IDF),
-        },
-    )
+    # Keep in sync with scripts/qdrant_init.sh.
+    if not qc.collection_exists(name):
+        qc.create_collection(
+            collection_name=name,
+            vectors_config={
+                "dense": models.VectorParams(size=dense_size, distance=models.Distance.COSINE),
+            },
+            sparse_vectors_config={
+                "sparse": models.SparseVectorParams(modifier=models.Modifier.IDF),
+            },
+        )
+    ensure_payload_indexes(qc, name)
 
 
 def recreate_collection(qc: QdrantClient, name: str, dense_size: int) -> None:
@@ -77,7 +95,8 @@ def delete_existing_chat_points(qc: QdrantClient, collection_name: str, chat_id:
 
 
 def embed_dense_batch(texts: list[str]) -> list[list[float]]:
-    return [vector.tolist() for vector in get_dense_model().embed(texts)]
+    prefixed = [f"{DENSE_DOCUMENT_PREFIX}{text}" for text in texts]
+    return [vector.tolist() for vector in get_dense_model().embed(prefixed)]
 
 
 def build_metadata(chat: dict, chunk: dict, messages_by_id: dict) -> dict:
@@ -96,8 +115,10 @@ def build_metadata(chat: dict, chunk: dict, messages_by_id: dict) -> dict:
         "chat_sn": chat["sn"],
         "thread_sn": next((message.get("thread_sn") for message in messages if message.get("thread_sn")), None),
         "message_ids": msg_ids,
-        "start": str(min(times)),
-        "end": str(max(times)),
+        "message_blocks": chunk.get("message_blocks") or [],
+        # Integers: the search service filters on these with Qdrant range conditions.
+        "start": min(times),
+        "end": max(times),
         "participants": participants,
         "mentions": mentions,
         "contains_forward": any(message.get("is_forward") for message in messages),
@@ -113,8 +134,8 @@ def load_index_payload(data_path: Path) -> tuple[dict[str, Any], list[dict[str, 
     return chat, messages, messages_by_id
 
 
-def load_synthetic_eval_chunks(data_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, dict[str, Any]]]:
-    chat = {
+def build_synthetic_chat(data_path: Path) -> dict[str, Any]:
+    return {
         "id": f"synthetic://{data_path.stem}",
         "name": f"Synthetic Eval Corpus {data_path.stem}",
         "sn": f"synthetic://{data_path.stem}",
@@ -124,11 +145,9 @@ def load_synthetic_eval_chunks(data_path: Path) -> tuple[dict[str, Any], list[di
         "members": [],
     }
 
-    chunks: list[dict[str, Any]] = []
-    messages_by_id: dict[str, dict[str, Any]] = {}
-    seen_ids: set[str] = set()
-    base_time = 1_700_000_000
 
+def iter_synthetic_answers(data_path: Path):
+    seen_ids: set[str] = set()
     with data_path.open() as handle:
         for line in handle:
             line = line.strip()
@@ -140,39 +159,79 @@ def load_synthetic_eval_chunks(data_path: Path) -> tuple[dict[str, Any], list[di
             answer_text = str(answer.get("text") or "").strip()
             if not message_ids or not answer_text:
                 continue
-
             for message_id in message_ids:
                 if message_id in seen_ids:
                     continue
                 seen_ids.add(message_id)
-                timestamp = base_time + len(seen_ids)
-                messages_by_id[message_id] = {
-                    "id": message_id,
-                    "time": timestamp,
-                    "sender_id": "synthetic@eval.local",
-                    "mentions": [],
-                    "thread_sn": None,
-                    "is_forward": False,
-                    "is_quote": False,
-                }
-                chunks.append(
-                    {
-                        "page_content": (
-                            f"CHAT: {chat['name']}\n\n"
-                            f"CHAT_TYPE: {chat['type']}\n\n"
-                            f"CHAT_ID: {chat['id']}\n\n"
-                            "MESSAGES:\n\n"
-                            f"[2023-11-14 22:13:{timestamp % 60:02d} UTC | synthetic@eval.local]\n"
-                            f"{answer_text}"
-                        ),
-                        "dense_content": f"chat {chat['name']}\n\nchat_type {chat['type']}\n\n{answer_text}",
-                        "sparse_content": (
-                            f"{chat['name']}\n{chat['type']}\n{chat['id']}\n"
-                            f"{answer_text}\n\nsender: synthetic@eval.local"
-                        ),
-                        "message_ids": [message_id],
-                    }
-                )
+                yield message_id, answer_text
+
+
+def load_synthetic_messages(data_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Synthetic corpus as raw messages, so /index runs the real chunking pipeline."""
+    chat = build_synthetic_chat(data_path)
+    messages: list[dict[str, Any]] = []
+    base_time = 1_700_000_000
+
+    for offset, (message_id, answer_text) in enumerate(iter_synthetic_answers(data_path), start=1):
+        messages.append(
+            {
+                "id": message_id,
+                "time": base_time + offset,
+                "sender_id": "synthetic@eval.local",
+                "text": answer_text,
+                "file_snippets": "",
+                "thread_sn": None,
+                "mentions": [],
+                "is_system": False,
+                "is_hidden": False,
+                "is_forward": False,
+                "is_quote": False,
+            }
+        )
+
+    messages_by_id = {message["id"]: message for message in messages}
+    return chat, messages, messages_by_id
+
+
+def load_synthetic_eval_chunks(data_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    chat = build_synthetic_chat(data_path)
+
+    chunks: list[dict[str, Any]] = []
+    messages_by_id: dict[str, dict[str, Any]] = {}
+    base_time = 1_700_000_000
+
+    for offset, (message_id, answer_text) in enumerate(iter_synthetic_answers(data_path), start=1):
+        timestamp = base_time + offset
+        messages_by_id[message_id] = {
+            "id": message_id,
+            "time": timestamp,
+            "sender_id": "synthetic@eval.local",
+            "mentions": [],
+            "thread_sn": None,
+            "is_forward": False,
+            "is_quote": False,
+        }
+        message_block_text = (
+            f"[2023-11-14 22:13:{timestamp % 60:02d} UTC | synthetic@eval.local]\n{answer_text}"
+        )
+        chunks.append(
+            {
+                "page_content": (
+                    f"CHAT: {chat['name']}\n\n"
+                    f"CHAT_TYPE: {chat['type']}\n\n"
+                    f"CHAT_ID: {chat['id']}\n\n"
+                    "MESSAGES:\n\n"
+                    f"{message_block_text}"
+                ),
+                "dense_content": f"chat {chat['name']}\n\nchat_type {chat['type']}\n\n{answer_text}",
+                "sparse_content": (
+                    f"{chat['name']}\n{chat['type']}\n{chat['id']}\n"
+                    f"{answer_text}\n\nsender: synthetic@eval.local"
+                ),
+                "message_ids": [message_id],
+                "message_blocks": [{"message_id": message_id, "text": message_block_text}],
+            }
+        )
 
     return chat, chunks, messages_by_id
 
@@ -195,12 +254,15 @@ def main() -> None:
     http = httpx.Client(timeout=300.0)
 
     synthetic_mode = is_synthetic_eval_jsonl(DATA_PATH)
-    if synthetic_mode:
+    if synthetic_mode and not SYNTHETIC_VIA_INDEX:
         print(f"[1/4] build synthetic corpus from {DATA_PATH}")
         chat, chunks, messages_by_id = load_synthetic_eval_chunks(DATA_PATH)
         print(f"      -> {len(chunks)} synthetic chunks")
     else:
-        chat, messages, messages_by_id = load_index_payload(DATA_PATH)
+        if synthetic_mode:
+            chat, messages, messages_by_id = load_synthetic_messages(DATA_PATH)
+        else:
+            chat, messages, messages_by_id = load_index_payload(DATA_PATH)
         print(f"[1/4] POST /index ({len(messages)} messages)")
         response = http.post(
             f"{INDEX_URL}/index",
