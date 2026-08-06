@@ -21,7 +21,8 @@ curl http://localhost:8002/health
 curl http://localhost:6333/collections
 ```
 
-Readiness checks (models warmed up, Qdrant collection exists):
+Readiness checks (models warmed up, Qdrant collection exists; search also
+validates its dense vector size):
 
 ```bash
 curl http://localhost:8001/ready
@@ -213,8 +214,16 @@ Useful search variables:
 - `RETRIEVE_K`
 - `MAX_DENSE_QUERIES`
 - `MAX_SPARSE_QUERIES`
-- `RESCORE_*` / `ASSEMBLE_*` — rescoring weights
+- `POINT_RESCORE_ENABLED=0|1` — optional point-level pass, default `0`
+- `RESCORE_*` — weights used only when point rescoring is enabled
+- `ASSEMBLE_*` — final message-block ordering weights
 - `TIME_FILTER_ENABLED=0|1`
+- `TIME_FILTER_MODE=hard|soft` — default `hard`
+- `TIME_FILTER_BOUNDS_GUARD_ENABLED=0|1`
+- `TIME_FILTER_BOUNDS_CACHE_SECONDS` — default `60`
+- `TIME_FILTER_BOUNDS_RETRY_SECONDS` — default `5`
+- `TIME_FILTER_SOFT_DENSE_QUERIES`, `TIME_FILTER_SOFT_SPARSE_QUERIES`
+- `TIME_FILTER_SOFT_PREFETCH_K`
 - `RERANK_ENABLED=1` — local cross-encoder rerank (slower, better ordering)
 
 Switching to a stronger dense model (needs `RESET_COLLECTION=1` reingest):

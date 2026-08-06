@@ -15,9 +15,9 @@ The current implementation is local-first:
 - compute query embeddings locally;
 - fetch candidates from Qdrant (optionally filtered by time);
 - combine dense and sparse retrieval with fusion;
-- apply lightweight local rescoring;
+- optionally apply point-level local rescoring;
 - optionally rerank top candidates with a local cross-encoder;
-- assemble final `message_ids`.
+- assemble and score final `message_ids`.
 
 ## Module structure
 
@@ -45,15 +45,15 @@ question
   -> local embeddings
   -> Qdrant hybrid retrieval (+ optional time filter)
   -> fusion
-  -> rescoring
+  -> optional point-level rescoring
   -> optional cross-encoder rerank
-  -> message_id assembly
+  -> message-level scoring and assembly
 ```
 
 ## Query preparation
 
 The primary query is built from:
-- `question.search_text`, if present;
+- `question.search_text`, if non-empty after normalization;
 - otherwise `question.text`.
 
 Additional signal comes from:
@@ -81,21 +81,37 @@ Russian/English filler words, so the 12-term budget is not consumed by
 `подскажи`, `пожалуйста`, `что` and similar tokens before entities are
 reached.
 
+A valid structured `date_range` is authoritative. `date_mentions` are parsed
+only when the structured range is absent or invalid, so a precise day is not
+accidentally widened by a looser year or month mention.
+
 ## Time filter
 
 If the question carries `date_range` or ISO-like dates inside `date_mentions`
 (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`), the service builds a time window, widens it
-by `TIME_FILTER_MARGIN_SECONDS` and applies it to Qdrant prefetch as a range
-condition over `metadata.start` / `metadata.end`. A date-only upper bound is
-treated as inclusive end of that day. Controlled by `TIME_FILTER_ENABLED`.
-Requires integer `start` / `end` payload fields (written by
-`eval/ingest.py`) and their payload indexes.
+by `TIME_FILTER_MARGIN_SECONDS` and builds a range condition over
+`metadata.start` / `metadata.end`. A date-only upper bound is treated as the
+inclusive end of that day. The feature is controlled by
+`TIME_FILTER_ENABLED` and requires integer `start` / `end` payload fields plus
+their payload indexes.
 
-The filter is a precision optimization, not a correctness gate: if the
-filtered search returns zero points (the question date refers to message
-content rather than send time, or the collection predates the integer
-`start`/`end` migration), the service logs a warning and retries the same
-query without the filter instead of returning an empty result.
+`TIME_FILTER_MODE=hard` is the quality-tested default. It applies the range to
+every dense and sparse branch. If the filtered search returns zero points, the
+service retries once without the filter, so an inaccurate date does not turn
+into an empty response.
+
+With `TIME_FILTER_BOUNDS_GUARD_ENABLED=1`, the service lazily caches the
+collection-wide earliest `metadata.start` and latest `metadata.end`. A query
+range that cannot overlap that envelope skips filtering before retrieval. The
+cache is single-flight, uses success/retry TTLs, and fails open: a bounds lookup
+failure leaves normal hard filtering and its zero-result fallback in place.
+
+`TIME_FILTER_MODE=soft` remains available for experiments. It preserves all
+normal unfiltered branches and adds filtered copies of the strongest branches
+as a fusion signal. Their count and limit are controlled by
+`TIME_FILTER_SOFT_DENSE_QUERIES`, `TIME_FILTER_SOFT_SPARSE_QUERIES` and
+`TIME_FILTER_SOFT_PREFETCH_K`. It is not the default because the dialogues
+benchmark ranked worse with the additional fusion branches.
 
 ## Dense queries
 
@@ -135,7 +151,9 @@ Main parameters:
 
 ## Rescoring
 
-After retrieval the service applies a lightweight local rescore.
+Point-level rescoring is controlled by `POINT_RESCORE_ENABLED` and is disabled
+by default. The committed evaluation sets ranked slightly better without it,
+and skipping the pass also lowers CPU cost.
 
 Signals include:
 - exact term hits in the message block;
@@ -149,10 +167,14 @@ behave the same under `dbsf` and `rrf`. All weights are configurable:
 `RESCORE_MESSAGE_HIT_WEIGHT`, `RESCORE_CONTEXT_HIT_WEIGHT`,
 `RESCORE_METADATA_HIT_WEIGHT`.
 
+These `RESCORE_*` values are used only when point rescoring is enabled. Final
+message assembly still applies message-block scoring through `ASSEMBLE_*`;
+`no_rescore=true` skips only the optional point-level stage.
+
 ## Reranker
 
-An optional cross-encoder rerank stage runs after rescoring. It is disabled
-by default and controlled by:
+An optional cross-encoder rerank stage runs after fusion or point rescoring. It
+is disabled by default and controlled by:
 - `RERANK_ENABLED=1`
 - `RERANK_MODEL_NAME` (default `jinaai/jina-reranker-v2-base-multilingual`)
 - `RERANK_TOP_K` — how many top candidates are reranked
@@ -162,6 +184,10 @@ The reranker scores `(primary_query, chunk messages)` pairs locally and
 reorders the top candidates; the rest keep their order. It adds noticeable
 latency and a ~1.1 GB model download, so enable it deliberately and measure
 with `eval/run.py --stages`.
+
+Reranking is fail-open: a model or runtime failure is logged and the fused
+candidates continue to final assembly. A warmup failure does not stop service
+startup; reranking stays disabled until the next restart.
 
 ## Final assembly
 
@@ -191,6 +217,9 @@ Useful query parameters:
 - `no_rerank=true`
 
 This endpoint is intended for local analysis and A/B testing.
+The `rescored` stage appears only when `POINT_RESCORE_ENABLED=1` and point
+rescoring was not skipped. The `reranked` stage appears only when reranking is
+enabled and succeeds.
 
 ## Default models
 

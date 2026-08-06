@@ -130,7 +130,8 @@ def collect_entity_terms(entities: Entities | None) -> list[str]:
 
 
 def build_primary_query(question: Question) -> str:
-    return normalize_text(question.search_text or question.text)
+    # A whitespace-only search_text is not a usable override.
+    return normalize_text(question.search_text) or normalize_text(question.text)
 
 
 def extract_exact_terms(question: Question) -> list[str]:
@@ -189,17 +190,21 @@ def extract_time_range(question: Question) -> tuple[int, int] | None:
         start = _parse_datetime(question.date_range.from_)
         end = _parse_datetime(question.date_range.to, end_of_day=True)
         if start is not None and end is not None and start <= end:
+            # An explicit structured range is authoritative. Mixing it with
+            # looser date_mentions can accidentally widen a precise day into
+            # a month or year and make the filter ineffective.
             bounds.append((start, end))
 
-    for mention in question.date_mentions or []:
-        for match in DATE_MENTION_RE.finditer(str(mention)):
-            year = int(match.group(1))
-            month = int(match.group(2)) if match.group(2) else None
-            day = int(match.group(3)) if match.group(3) else None
-            try:
-                bounds.append(_date_bounds(year, month, day))
-            except ValueError:
-                continue
+    if not bounds:
+        for mention in question.date_mentions or []:
+            for match in DATE_MENTION_RE.finditer(str(mention)):
+                year = int(match.group(1))
+                month = int(match.group(2)) if match.group(2) else None
+                day = int(match.group(3)) if match.group(3) else None
+                try:
+                    bounds.append(_date_bounds(year, month, day))
+                except ValueError:
+                    continue
 
     if not bounds:
         return None

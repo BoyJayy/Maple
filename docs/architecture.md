@@ -17,7 +17,9 @@ chat payload
 question
   -> search
   -> dense and sparse retrieval
-  -> fusion + rescoring
+  -> fusion
+  -> optional point-level rescore
+  -> message-level assembly
   -> message_ids
 ```
 
@@ -45,7 +47,8 @@ Responsibilities:
 - compute local dense and sparse embeddings;
 - query Qdrant with both retrieval modes;
 - merge results with fusion;
-- apply lightweight local rescoring;
+- optionally apply point-level local rescoring;
+- score message blocks during final assembly;
 - return final `message_ids`.
 
 ### Qdrant
@@ -84,10 +87,12 @@ Token preserving text used for sparse embeddings and exact term matching.
 The search pipeline is hybrid:
 - dense retrieval finds semantic matches;
 - sparse retrieval finds exact terms, names, links and identifiers;
-- an optional time filter narrows candidates when the question mentions dates;
+- hard time filtering narrows candidates only when the requested range can
+  overlap the cached collection envelope; a soft fusion mode remains optional;
 - fusion combines both result sets;
-- rescoring (rank-based, morphology-aware term matching) gives a small boost
-  to points with stronger exact matches in the message body or metadata;
+- optional point rescoring (off by default) can boost chunks with stronger
+  morphology-aware exact matches in the message body or metadata;
+- message-block scoring remains active during final assembly;
 - an optional local cross-encoder reranker reorders the top candidates.
 
 ## Local first setup
@@ -117,7 +122,7 @@ All are loaded locally through `fastembed`.
 - `config.py` — runtime settings
 - `schemas.py` — API models
 - `querying.py` — query preparation and exact term extraction
-- `pipeline.py` — embeddings, Qdrant retrieval, fusion and rescoring
+- `pipeline.py` — embeddings, Qdrant retrieval, fusion, optional rescoring and assembly
 
 ### eval
 
